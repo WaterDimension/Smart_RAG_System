@@ -122,7 +122,9 @@ public class UserService {
         createPrivateOrgTag(privateTagId, username, user);
         
         // 新用户默认拥有系统默认组织和自己的私人组织
+        // java9快速创建 不可变集合（创建后不能增、删、改，只读）
         List<String> assignedOrgTags = List.of(DEFAULT_ORG_TAG, privateTagId);
+
         // 用户所属组织标签，多个用逗号分隔
         user.setOrgTags(String.join(",", assignedOrgTags));
         
@@ -131,6 +133,7 @@ public class UserService {
         
         userRepository.save(user);
         
+        // 每次用户发起请求时，系统都需要知道这个用户属于哪些组织
         // 缓存组织标签信息
         orgTagCacheService.cacheUserOrgTags(username, assignedOrgTags);
         orgTagCacheService.cacheUserPrimaryOrg(username, privateTagId);
