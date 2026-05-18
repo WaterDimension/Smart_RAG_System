@@ -13,6 +13,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 /**
  * 配置Spring Security的类
+ * 定义了哪些url需要什么权限才能访问
  * 该类定义了应用的安全配置，包括请求的授权规则、CSRF保护的配置以及会话管理策略
  */
 @Configuration
@@ -29,6 +30,7 @@ public class SecurityConfig {
     private OrgTagAuthorizationFilter orgTagAuthorizationFilter;
 
     /**
+     * 1. 制定所有接口的访问规则
      * 配置SecurityFilterChain bean的方法
      * 该方法主要用于配置应用的安全规则，包括哪些请求需要授权、CSRF保护的启用或禁用、会话管理策略等
      *
@@ -66,16 +68,17 @@ public class SecurityConfig {
                             // 聊天相关接口 - WebSocket停止Token获取
                             .requestMatchers("/api/v1/chat/**").hasAnyRole("USER", "ADMIN")
                             // 管理员专属接口 - 知识库管理、系统状态、用户活动监控
-                            .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
+                            .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")   //授权检查
                             // 用户组织标签管理接口
                             .requestMatchers("/api/v1/users/primary-org").hasAnyRole("USER", "ADMIN")
                             // 其他请求需要认证
                             .anyRequest().authenticated())
+                    // 2.搭建好过滤器的执行顺序
                     // 配置会话管理策略
                     // 设置会话创建策略为STATELESS，表示不会创建会话，通常用于无状态的API应用
                     .sessionManagement(session -> session
-                            .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                    // 添加JWT认证过滤器
+                            .sessionCreationPolicy(SessionCreationPolicy.STATELESS)) //无状态会话配置
+                    // 添加JWT认证过滤器,放在 账号密码过滤器之前(Spring Security 原生自带,拦截「表单提交的账号 + 密码」，完成传统登录)
                     .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
                     // 添加组织标签授权过滤器
                     .addFilterAfter(orgTagAuthorizationFilter, JwtAuthenticationFilter.class);

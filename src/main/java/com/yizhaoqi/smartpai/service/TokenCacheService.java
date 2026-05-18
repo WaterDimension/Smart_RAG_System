@@ -156,6 +156,7 @@ public class TokenCacheService {
     
     /**
      * 检查token是否在黑名单中
+     * 主动失效的token，会立即从缓存中移除，不会在黑名单中记录。
      */
     public boolean isTokenBlacklisted(String tokenId) {
         try {

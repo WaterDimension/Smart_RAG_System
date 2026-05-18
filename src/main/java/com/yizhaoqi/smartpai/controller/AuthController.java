@@ -20,6 +20,7 @@ public class AuthController {
     /**
      * 刷新Token接口
      * 用于前端主动刷新token机制的后备方案
+     * @param request 包含refreshToken的请求体
      */
     @PostMapping("/refreshToken")
     public ResponseEntity<?> refreshToken(@RequestBody RefreshTokenRequest request) {

@@ -17,9 +17,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 /**
+ * 身份核验：
  * 自定义的过滤器，用于解析请求头中的 JWT Token，并验证用户身份。
  * 如果 Token 有效，则将用户信息和权限设置到 Spring Security 的上下文中，后续的请求可以基于用户角色进行授权。
  */
+//继承，每次请求只执行一次
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
@@ -37,13 +39,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         try {
-            // 从请求头中提取 JWT Token
+            // 1.从请求头中提取 JWT Token
             String token = extractToken(request);
+            // 2. 验证 Token 是否有效，并根据需要刷新 Token
             if (token != null) {
                 String newToken = null;
                 String username = null;
                 
-                // 首先检查token是否有效
+                //  首先检查token是否有效
                 if (jwtUtils.validateToken(token)) {
                     // Token有效，检查是否需要预刷新
                     if (jwtUtils.shouldRefreshToken(token)) {
@@ -72,13 +75,19 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 // 设置用户认证信息
                 if (username != null && !username.isEmpty()) {
                     UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                    // 把通过 JWT 验证的用户，包装成 Spring Security 能识别的「认证对象」，并存入安全上下文
                     UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                            userDetails, null, userDetails.getAuthorities());
+                            userDetails,                // 1. 用户完整信息（用户名、角色、权限）
+                            null,                       // 2. 认证凭证（密码），这里不需要，因为已经通过 JWT 验证了
+                            userDetails.getAuthorities());  // 3. 权限列表（ROLE_USER/ROLE_ADMIN）
+                    // 设置认证对象的详细信息（如请求来源IP、会话ID等），增强安全性
                     authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+
+                    //【最关键】将认证对象存入Spring安全上下文,存进去之后，任何地方都能获取当前登录用户,比如@PreAuthorize("hasRole('ADMIN')")
                     SecurityContextHolder.getContext().setAuthentication(authentication);
                 }
             }
-            filterChain.doFilter(request, response); // 继续执行过滤链
+            filterChain.doFilter(request, response); // 继续执行SecurityConfig过滤链
         } catch (Exception e) {
             // 记录错误日志
             logger.error("Cannot set user authentication: {}", e);

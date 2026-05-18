@@ -53,7 +53,7 @@ public class UserService {
     private static final String PRIVATE_ORG_DESCRIPTION = "用户的私人组织标签，仅用户本人可访问";
     private static final long BYTES_PER_MB = 1024L * 1024L;
     private static final int MAX_TAG_ID_LENGTH = 255;
-    private static final Pattern NON_ALNUM_PATTERN = Pattern.compile("[^a-z0-9]+");
+    private static final Pattern NON_ALNUM_PATTERN = Pattern.compile("[^a-z0-9]+");  // 匹配非字母数字字符
     private static final Pattern TRIM_DASH_PATTERN = Pattern.compile("(^-+|-+$)");
     private static final Pattern PASSWORD_PATTERN = Pattern.compile(
             "^(?=.*[A-Za-z])(?=.*\\d).{6,18}$"
@@ -94,34 +94,35 @@ public class UserService {
 
     @Transactional
     public void registerUser(String username, String password, String inviteCode) {
-        // 注册规则验证
+        // 1. 验证注册策略
         validateRegistrationPolicy(username, inviteCode);
         validatePassword(password);
 
-        // 检查数据库中是否已存在该用户名
+        // 2. 检查用户名是否已存在
         if (userRepository.findByUsername(username).isPresent()) {
             // 若用户名已存在，抛出自定义异常，状态码为 400 Bad Request
             throw new CustomException("Username already exists", HttpStatus.BAD_REQUEST);
         }
         
-        // 确保默认组织标签存在（系统内部使用）
+        // 3. 确保默认组织标签存在
         ensureDefaultOrgTagExists();
         
+        // 4. 创建用户对象（密码 BCrypt 加密）
         User user = new User();
         user.setUsername(username);
-        // 对密码进行加密处理并设置到 User 对象中
         user.setPassword(PasswordUtil.encode(password));
         // 设置用户角色为普通用户
         user.setRole(User.Role.USER);
         
-        // 保存用户以生成ID
+        // 5. 保存用户
         userRepository.save(user);
         
-        // 创建用户的私人组织标签
+        //6. 创建用户的私人组织标签
         String privateTagId = PRIVATE_TAG_PREFIX + username;
         createPrivateOrgTag(privateTagId, username, user);
         
-        // 新用户默认拥有系统默认组织和自己的私人组织
+        // 7. 设置组织标签
+        // 新用户默认拥有系统默认组织DEFAULT 和 自己的私人组织PRIVATE_用户名
         // java9快速创建 不可变集合（创建后不能增、删、改，只读）
         List<String> assignedOrgTags = List.of(DEFAULT_ORG_TAG, privateTagId);
 
@@ -134,7 +135,7 @@ public class UserService {
         userRepository.save(user);
         
         // 每次用户发起请求时，系统都需要知道这个用户属于哪些组织
-        // 缓存组织标签信息
+        // 8. 缓存组织标签
         orgTagCacheService.cacheUserOrgTags(username, assignedOrgTags);
         orgTagCacheService.cacheUserPrimaryOrg(username, privateTagId);
         
@@ -244,6 +245,7 @@ public class UserService {
     }
 
     private void validatePassword(String password) {
+        // 调用工具类验证密码格式
         if (password == null || !PASSWORD_PATTERN.matcher(password).matches()) {
             throw new CustomException("密码格式不正确，6-18位字符，必须包含字母和数字", HttpStatus.BAD_REQUEST);
         }
@@ -288,7 +290,7 @@ public class UserService {
         if (creator.getRole() != User.Role.ADMIN) {
             throw new CustomException("Only administrators can create organization tags", HttpStatus.FORBIDDEN);
         }
-        
+        // 解析或生成标签ID
         String resolvedTagId = resolveOrGenerateTagId(tagId, name);
         
         // 如果指定了父标签，检查父标签是否存在
@@ -304,10 +306,11 @@ public class UserService {
         tag.setParentTag(parentTag);
         tag.setUploadMaxSizeBytes(normalizeUploadMaxSizeBytes(uploadMaxSizeMb));
         tag.setCreatedBy(creator);
+        // 不用加时间戳，JPA会自动设置
         
         OrganizationTag savedTag = organizationTagRepository.save(tag);
         
-        // 清除标签缓存，因为层级关系可能变化
+        // 清除标签redis缓存，因为层级关系可能变化(涉及新增、删除、修改标签)
         orgTagCacheService.invalidateAllEffectiveTagsCache();
         
         return savedTag;
@@ -315,7 +318,6 @@ public class UserService {
     
     /**
      * 为用户分配组织标签
-     * 
      * @param userId 用户ID
      * @param orgTags 组织标签ID列表
      * @param adminUsername 管理员用户名
@@ -348,10 +350,12 @@ public class UserService {
         }
         
         // 找出并保留用户的私人组织标签
+        // 私人标签规则：PRIVATE_ + 用户名（用户专属，系统自动生成）
+        // 私人标签是用户个人专属的，管理员可以修改公共标签，但绝对不能删除用户的私人标签
         String privateTagId = PRIVATE_TAG_PREFIX + user.getUsername();
-        boolean hasPrivateTag = existingTags.contains(privateTagId);
+        boolean hasPrivateTag = existingTags.contains(privateTagId);  // ⭐ 判断用户是否有私人标签
         
-        // 确保用户的私人组织标签不会被删除
+        // 确保用户的私人组织标签存在： 用户有私人标签 且 新列表中不包含->添加
         Set<String> finalTags = new HashSet<>(orgTags);
         if (hasPrivateTag && !finalTags.contains(privateTagId)) {
             finalTags.add(privateTagId);
@@ -366,6 +370,7 @@ public class UserService {
             if (hasPrivateTag) {
                 user.setPrimaryOrg(privateTagId);
             } else {
+                 // 没有私人标签，用第一个标签
                 user.setPrimaryOrg(new ArrayList<>(finalTags).get(0));
             }
         }
@@ -373,10 +378,15 @@ public class UserService {
         userRepository.save(user);
         
         // 更新缓存
-        orgTagCacheService.deleteUserOrgTagsCache(user.getUsername());
-        orgTagCacheService.cacheUserOrgTags(user.getUsername(), new ArrayList<>(finalTags));
+        //  键1: user_org_tags:jack │ 值: ["PRIVATE_jack", "后端组"]         简单 - 直接从用户表读取
+        orgTagCacheService.deleteUserOrgTagsCache(user.getUsername()); // 1. 删除旧的组织标签缓存
+        orgTagCacheService.cacheUserOrgTags(user.getUsername(), new ArrayList<>(finalTags)); // 2. 缓存新的组织标签
+        
+       
         // 同时清除有效标签缓存
-        orgTagCacheService.deleteUserEffectiveTagsCache(user.getUsername());
+        // 键2: user:effective_org_tags:jack 值: ["PRIVATE_jack", "后端组", "技术部", "公司", "DEFAULT"] 复杂 - 需要递归查询所有父标签
+        // 有效标签需要"递归计算"父标签，不只是简单加上 orgTags，直接在下次查询是计算。
+        orgTagCacheService.deleteUserEffectiveTagsCache(user.getUsername()); // 3. 删除旧的有效标签缓存
         
         if (user.getPrimaryOrg() != null && !user.getPrimaryOrg().isEmpty()) {
             orgTagCacheService.cacheUserPrimaryOrg(user.getUsername(), user.getPrimaryOrg());
@@ -393,7 +403,7 @@ public class UserService {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new CustomException("User not found", HttpStatus.NOT_FOUND));
         
-        // 尝试从缓存获取
+        // 尝试从缓存获取 用户组织标签
         List<String> orgTags = orgTagCacheService.getUserOrgTags(username);
         String primaryOrg = orgTagCacheService.getUserPrimaryOrg(username);
         
@@ -410,7 +420,7 @@ public class UserService {
             orgTagCacheService.cacheUserPrimaryOrg(username, primaryOrg);
         }
         
-        // 获取组织标签的详细信息
+        // 获取用户 每个组织标签的详细信息
         List<Map<String, Object>> orgTagDetails = new ArrayList<>();
         for (String tagId : orgTags) {
             OrganizationTag tag = organizationTagRepository.findByTagId(tagId)
@@ -615,7 +625,7 @@ public class UserService {
     /**
      * 检查是否会形成标签层级循环
      * 
-     * @param tagId 要设置父标签的标签ID
+     * @param tagId 要设置父标签的旧标签ID
      * @param newParentId 新的父标签ID
      * @return 是否会形成循环
      */
@@ -642,7 +652,6 @@ public class UserService {
     
     /**
      * 删除组织标签
-     * 
      * @param tagId 标签ID
      * @param adminUsername 管理员用户名
      */
@@ -665,7 +674,7 @@ public class UserService {
             throw new CustomException("Cannot delete the default organization tag", HttpStatus.BAD_REQUEST);
         }
         
-        // 检查是否有子标签
+        // 检查是否有子标签， 得先删除子标签，然后才能删除父标签
         List<OrganizationTag> children = organizationTagRepository.findByParentTag(tagId);
         if (!children.isEmpty()) {
             throw new CustomException("Cannot delete a tag with child tags", HttpStatus.BAD_REQUEST);
@@ -680,7 +689,7 @@ public class UserService {
                     throw new CustomException("Cannot delete a tag that is assigned to users", HttpStatus.CONFLICT);
                 }
                 
-                // 检查是否被用作主组织标签
+                // 防御性：检查是否被用作主组织标签
                 if (tagId.equals(user.getPrimaryOrg())) {
                     throw new CustomException("Cannot delete a tag that is used as primary organization", HttpStatus.CONFLICT);
                 }
@@ -810,21 +819,32 @@ public class UserService {
         return true;
     }
 
+    /**
+     * 解析或生成组织标签ID
+     * @param tagId 输入的标签ID（可能为空）
+     * @param name 标签名称（用于生成唯一ID）
+     * @return 标准化后的标签ID（可能为空）
+     */
     private String resolveOrGenerateTagId(String tagId, String name) {
         String normalizedTagId = tagId == null ? "" : tagId.trim();
+        //如果用户【传入了有效的tagId】
         if (!normalizedTagId.isEmpty()) {
+            // 校验1：禁止使用系统保留前缀 PRIVATE_ 开头（系统私有标签，用户不能用）
             if (normalizedTagId.startsWith(PRIVATE_TAG_PREFIX)) {
                 throw new CustomException("Tag ID cannot start with PRIVATE_", HttpStatus.BAD_REQUEST);
             }
+            // 校验2：检查标签ID是否已存在
             if (organizationTagRepository.existsByTagId(normalizedTagId)) {
                 throw new CustomException("Tag ID already exists", HttpStatus.BAD_REQUEST);
             }
             return normalizedTagId;
         }
+        //如果用户【没传tagId】→ 自动生成唯一的tagId
         return generateUniqueTagId(name);
     }
 
     private String generateUniqueTagId(String name) {
+
         String slug = buildTagSlug(name);
         String baseId = truncateTagId("ORG_" + slug);
 
@@ -848,8 +868,15 @@ public class UserService {
         }
     }
 
+    /**
+     * 构建标签的 URL 友好名称（slug）
+     * @param name 标签名称（可能为空）
+     * @return 标签的 URL 友好名称（slug）
+     */
     private String buildTagSlug(String name) {
+        // 确保名称不为空
         String raw = name == null ? "" : name.trim().toLowerCase(Locale.ROOT);
+        // 移除非字母数字字符并替换为短横线
         String slug = NON_ALNUM_PATTERN.matcher(raw).replaceAll("-");
         slug = TRIM_DASH_PATTERN.matcher(slug).replaceAll("");
         return slug.isEmpty() ? "tag" : slug;

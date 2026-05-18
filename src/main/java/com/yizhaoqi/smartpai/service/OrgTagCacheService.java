@@ -65,6 +65,8 @@ public class OrgTagCacheService {
     public List<String> getUserOrgTags(String username) {
         try {
             String key = USER_ORG_TAGS_KEY_PREFIX + username;
+            // 获取所有元素
+            // redisTemplate默认泛型是Object，需要强制类型转换
             List<Object> result = redisTemplate.opsForList().range(key, 0, -1);
             if (result != null && !result.isEmpty()) {
                 return result.stream()
@@ -220,8 +222,10 @@ public class OrgTagCacheService {
      */
     public void invalidateAllEffectiveTagsCache() {
         try {
+            // 1. 匹配 Redis 中【所有】以用户有效标签为前缀的缓存 key
             Set<String> keys = redisTemplate.keys(USER_EFFECTIVE_TAGS_KEY_PREFIX + "*");
             if (keys != null && !keys.isEmpty()) {
+                // delete(Collection<String> keys)删除多个 key
                 redisTemplate.delete(keys);
                 logger.info("Invalidated all effective organization tags cache");
             }

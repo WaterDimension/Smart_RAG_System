@@ -39,9 +39,12 @@ public class JwtUtils {
 
     /**
      * 解析 Base64 密钥，并返回 SecretKey
+     * 还原 + 格式转换: 先解析 Base64 → 再用 hmacShaKeyFor转换为 SecretKey 对象
      */
     private SecretKey getSigningKey() {
+        // 1. 将一串经过 Base64 编码的长字符串，还原成原始的二进制字节数组（byte[]）
         byte[] keyBytes = Base64.getDecoder().decode(secretKeyBase64);
+        // 2. JJWT 验证这串字节是否足够长，安全的话就将其包装成符合 HMAC-SHA 算法要求的官方 SecretKey 对象
         return Keys.hmacShaKeyFor(keyBytes);
     }
 
@@ -49,7 +52,8 @@ public class JwtUtils {
      * 生成 JWT Token（集成Redis缓存）
      */
     public String generateToken(String username) {
-        SecretKey key = getSigningKey(); // 解析密钥
+        //
+        SecretKey key = getSigningKey(); // 获取密钥
         
         // 获取用户信息
         User user = userRepository.findByUsername(username)
@@ -57,9 +61,9 @@ public class JwtUtils {
         
         // 生成唯一的tokenId
         String tokenId = generateTokenId();
-        long expireTime = System.currentTimeMillis() + EXPIRATION_TIME;
+        long expireTime = System.currentTimeMillis() + EXPIRATION_TIME; // 1小时过期
         
-        // 创建token内容
+        // 创建token的 Payload  （ Header + Payload + Signature）
         Map<String, Object> claims = new HashMap<>();
         claims.put("tokenId", tokenId); // 添加tokenId用于Redis缓存
         claims.put("role", user.getRole().name());
@@ -77,11 +81,14 @@ public class JwtUtils {
 
         String token = Jwts.builder()
                 .setClaims(claims)
-                .setSubject(username)
+                .setSubject(username)     //name设置成设置为 JWT 的 subject
                 .setExpiration(new Date(expireTime))
                 .signWith(key, SignatureAlgorithm.HS256)
                 .compact();
         
+        // JWT 自身无法实现主动失效，需要在Redis缓存中维护token状态，用户登陆需要双重验证token状态
+        // redis用来判断主动失效的token(哪怕 Token 没过期，接口也直接拦截)
+        // jwt做兜底，避免tokenId过期后还能正常登陆（redis只查主动失效的黑名单）
         // 缓存token信息到Redis
         tokenCacheService.cacheToken(tokenId, user.getId().toString(), username, expireTime);
         
@@ -91,23 +98,27 @@ public class JwtUtils {
 
     /**
      * 验证 JWT Token 是否有效（优先使用Redis缓存）
+     * 需要查询 Redis 确认是否主动失效，再验证JWT签名（双重验证）确认是否过期
      */
     public boolean validateToken(String token) {
         try {
-            // 首先从JWT中提取tokenId（快速失败）
+            // 首先从JWT中提取tokenId，不论是否过期，都返回（快速失败）
+            // jwt天生有缺陷，必须靠 tokenId+Redis 解决，而拿 tokenId 的唯一方式，就是忽略过期提取它。
+            // 要查 Redis 黑名单，必须先拿到 tokenId
             String tokenId = extractTokenIdFromToken(token);
             if (tokenId == null) {
                 logger.warn("Token does not contain tokenId");
                 return false;
             }
             
-            // 检查Redis缓存中的token状态
+            // 检查Redis缓存中的token状态，是否主动失效(在黑名单中记录)
             if (!tokenCacheService.isTokenValid(tokenId)) {
                 logger.debug("Token invalid in cache: {}", tokenId);
                 return false;
             }
             
             // Redis验证通过，再验证JWT签名（双重验证）
+            // 这里自动失效的token能过redis(黑名单中没有)，但会被ExpiredJwtException真正拦截
             Jwts.parserBuilder()
                     .setSigningKey(getSigningKey())
                     .build()
@@ -130,7 +141,7 @@ public class JwtUtils {
      */
     public String extractUsernameFromToken(String token) {
         try {
-            Claims claims = extractClaimsIgnoreExpiration(token);
+            Claims claims = extractClaimsIgnoreExpiration(token);  //payload
             return claims != null ? claims.getSubject() : null;
         } catch (Exception e) {
             logger.error("Error extracting username from token: {}", token, e);
@@ -200,9 +211,10 @@ public class JwtUtils {
             
             long expirationTime = claims.getExpiration().getTime();
             long currentTime = System.currentTimeMillis();
+            // 计算剩余有效时间
             long remainingTime = expirationTime - currentTime;
-            
-            return remainingTime > 0 && remainingTime < REFRESH_THRESHOLD;
+            // 未过期 + 剩余时间小于刷新阈值 → 需要刷新
+            return remainingTime > 0 && remainingTime < REFRESH_THRESHOLD; // 5分钟
         } catch (Exception e) {
             logger.debug("Cannot check if token should refresh: {}", e.getMessage());
             return false;
@@ -220,7 +232,9 @@ public class JwtUtils {
             long expirationTime = claims.getExpiration().getTime();
             long currentTime = System.currentTimeMillis();
             long expiredTime = currentTime - expirationTime;
-            
+            // 过期时间小于刷新宽限期 → 可刷新
+            // 5分钟内过期可刷新
+            // 7天内过期可刷新
             return expiredTime > 0 && expiredTime < REFRESH_WINDOW;
         } catch (Exception e) {
             logger.debug("Cannot check if expired token can refresh: {}", e.getMessage());
@@ -295,7 +309,7 @@ public class JwtUtils {
         
         // 生成唯一的refreshTokenId
         String refreshTokenId = generateTokenId();
-        long expireTime = System.currentTimeMillis() + REFRESH_TOKEN_EXPIRATION_TIME;
+        long expireTime = System.currentTimeMillis() + REFRESH_TOKEN_EXPIRATION_TIME; // 7天过期
         
         // 创建refreshToken内容（相对简单，只包含基本信息）
         Map<String, Object> claims = new HashMap<>();

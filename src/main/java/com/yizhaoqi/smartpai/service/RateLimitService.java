@@ -6,6 +6,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.concurrent.TimeUnit;
+/**
+ * 限流服务
+ */
 
 @Service
 public class RateLimitService {
@@ -94,9 +97,18 @@ public class RateLimitService {
                 limit.dayWindowSeconds()
         );
     }
-
+    /**
+     * 检查单窗口速率限制
+     * @param key 速率限制键（redis key）: 业务类型 + ip/用户ID
+     * @param max 最大请求数
+     * @param windowSeconds 时间窗口（秒）
+     * @param message 超出速率限制时的异常消息
+     */
     private void checkSingleWindow(String key, long max, long windowSeconds, String message) {
+        // 执行次数
         Long current = stringRedisTemplate.opsForValue().increment(key);
+
+        // redis 挂了，直接返回
         if (current == null) {
             return;
         }
@@ -104,8 +116,13 @@ public class RateLimitService {
         if (current == 1) {
             stringRedisTemplate.expire(key, windowSeconds, TimeUnit.SECONDS);
         }
-
+        // 当前计数 > 最大允许次数 → 触发限流
         if (current > max) {
+            // 获取key的剩余过期时间（还有多久重置限流）
+            //异常情况：ttl == null || ttl < 0:返回 -2 → key 不存在; -1 → key存在永久有效
+            // 如果拿不到剩余时间，或者剩余时间是负数（异常），
+            // 就让用户等待 完整的时间窗口；
+           //  否则，就让用户等待 真实的剩余时间。
             Long ttl = stringRedisTemplate.getExpire(key, TimeUnit.SECONDS);
             long retryAfterSeconds = ttl == null || ttl < 0 ? windowSeconds : ttl;
             throw new RateLimitExceededException(message, retryAfterSeconds);

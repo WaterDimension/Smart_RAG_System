@@ -98,6 +98,7 @@ public class UserController {
     public ResponseEntity<?> login(@RequestBody UserRequest request, HttpServletRequest httpServletRequest) {
         LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("USER_LOGIN");
         try {
+            //Redis 限流，用于保护登录、注册、聊天、LLM 和向量接口
             String clientIp = resolveClientIp(httpServletRequest);
             rateLimitService.checkLoginByIp(clientIp);
 
@@ -107,12 +108,14 @@ public class UserController {
                 return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "Username and password cannot be empty"));
             }
             
+            // 1. 验证用户
             String username = userService.authenticateUser(request.username(), request.password());
             if (username == null) {
                 LogUtils.logUserOperation(request.username(), "LOGIN", "authentication", "FAILED_INVALID_CREDENTIALS");
                 return ResponseEntity.status(401).body(Map.of("code", 401, "message", "Invalid credentials"));
             }
             
+            // 2. 生成 JWT Token和刷新令牌
             String token = jwtUtils.generateToken(username);
             String refreshToken = jwtUtils.generateRefreshToken(username);
             LogUtils.logUserOperation(username, "LOGIN", "token_generation", "SUCCESS");
@@ -195,6 +198,7 @@ public class UserController {
                 throw new CustomException("Invalid token", HttpStatus.UNAUTHORIZED);
             }
 
+            //查不到用户 → 直接抛 404 异常
             User user = userRepository.findByUsername(username)
                     .orElseThrow(() -> new CustomException("User not found", HttpStatus.NOT_FOUND));
 
@@ -247,6 +251,7 @@ public class UserController {
                 throw new CustomException("Invalid token", HttpStatus.UNAUTHORIZED);
             }
             
+            // 获取用户组织标签信息：orgTags、primaryOrg、orgTagDetails
             Map<String, Object> orgTagsInfo = userService.getUserOrgTags(username);
             
             LogUtils.logUserOperation(username, "GET_ORG_TAGS", "organization_tags", "SUCCESS");
@@ -267,13 +272,14 @@ public class UserController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("code", 500, "message", "Internal server error"));
         }
     }
-    
+
     // 设置用户主组织标签
     @PutMapping("/primary-org")
     public ResponseEntity<?> setPrimaryOrg(@RequestHeader("Authorization") String token, @RequestBody PrimaryOrgRequest request) {
         LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("SET_PRIMARY_ORG");
         String username = null;
         try {
+            // 从token中提取用户名
             username = jwtUtils.extractUsernameFromToken(token.replace("Bearer ", ""));
             if (username == null || username.isEmpty()) {
                 LogUtils.logUserOperation("anonymous", "SET_PRIMARY_ORG", "token_validation", "FAILED_INVALID_TOKEN");
@@ -287,6 +293,7 @@ public class UserController {
                 return ResponseEntity.badRequest().body(Map.of("code", 400, "message", "Primary organization tag cannot be empty"));
             }
             
+            // 缓存用户设置的主组织标签
             userService.setUserPrimaryOrg(username, request.primaryOrg());
             
             LogUtils.logUserOperation(username, "SET_PRIMARY_ORG", request.primaryOrg(), "SUCCESS");
@@ -304,6 +311,7 @@ public class UserController {
         }
     }
 
+    //
     @GetMapping("/usage")
     public ResponseEntity<?> getCurrentUserUsage(@RequestHeader("Authorization") String token) {
         String username = null;
@@ -498,6 +506,7 @@ public class UserController {
 }
 
 // 用户请求记录类
+//纯数据传输类（DTO）
 record UserRequest(String username, String password, String inviteCode) {}
 
 // 主组织标签请求记录类

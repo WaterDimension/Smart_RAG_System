@@ -2,6 +2,9 @@ package com.yizhaoqi.smartpai.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
+/**
+ * 速率限制配置类
+ */
 
 @Component
 @ConfigurationProperties(prefix = "rate-limit")
@@ -43,6 +46,9 @@ public class RateLimitProperties {
         return embeddingQueryGlobalToken;
     }
 
+    /**
+     * 单窗口速率限制配置类
+     */
     public static class WindowLimit {
         private int max;
         private long windowSeconds;

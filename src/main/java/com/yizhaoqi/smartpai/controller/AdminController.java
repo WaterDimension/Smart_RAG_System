@@ -559,6 +559,7 @@ public class AdminController {
             @RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer size) {
         String adminUsername = jwtUtils.extractUsernameFromToken(token.replace("Bearer ", ""));
+        // 验证管理员权限
         validateAdmin(adminUsername);
         
         try {

@@ -11,8 +11,7 @@ import java.lang.reflect.Type;
 import java.util.List;
 
 /**
- * @author YiHui
- * @date 2025/7/14
+ * JSON 工具类
  */
 public class JsonUtil {
     private static ObjectMapper mapper = new ObjectMapper();
