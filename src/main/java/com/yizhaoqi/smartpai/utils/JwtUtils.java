@@ -18,7 +18,9 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-
+/**
+ *  负责生成、验证和解析 JWT 令牌
+ */
 @Component
 public class JwtUtils {
     private static final Logger logger = LoggerFactory.getLogger(JwtUtils.class);
@@ -79,6 +81,8 @@ public class JwtUtils {
             claims.put("primaryOrg", user.getPrimaryOrg());
         }
 
+        //封装权限信息，
+        // 这种设计使得 JWT 令牌成为一个自包含的权限载体，避免频繁的数据库查询。
         String token = Jwts.builder()
                 .setClaims(claims)
                 .setSubject(username)     //name设置成设置为 JWT 的 subject
@@ -202,7 +206,7 @@ public class JwtUtils {
     }
     
     /**
-     * 检查token是否应该刷新（剩余时间少于阈值）
+     * 检查未过期token是否应该刷新（剩余时间少于阈值）
      */
     public boolean shouldRefreshToken(String token) {
         try {
@@ -222,7 +226,7 @@ public class JwtUtils {
     }
     
     /**
-     * 检查过期token是否仍可刷新（在宽限期内）
+     * 检查过期的token是否仍可刷新（在宽限期内）
      */
     public boolean canRefreshExpiredToken(String token) {
         try {
@@ -233,8 +237,7 @@ public class JwtUtils {
             long currentTime = System.currentTimeMillis();
             long expiredTime = currentTime - expirationTime;
             // 过期时间小于刷新宽限期 → 可刷新
-            // 5分钟内过期可刷新
-            // 7天内过期可刷新
+            //过期10 分钟内可刷新
             return expiredTime > 0 && expiredTime < REFRESH_WINDOW;
         } catch (Exception e) {
             logger.debug("Cannot check if expired token can refresh: {}", e.getMessage());

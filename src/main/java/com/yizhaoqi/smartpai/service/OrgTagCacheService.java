@@ -168,7 +168,7 @@ public class OrgTagCacheService {
                 }
             }
             
-            // 确保默认标签在结果中
+            // 关键在这里：确保 DEFAULT 永远在结果中（所有用户都有权访问 DEFAULT）
             allEffectiveTags.add(DEFAULT_ORG_TAG);
             
             List<String> result = new ArrayList<>(allEffectiveTags);

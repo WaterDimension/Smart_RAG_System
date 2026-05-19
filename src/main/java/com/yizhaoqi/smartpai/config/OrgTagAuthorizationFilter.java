@@ -52,21 +52,24 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
         try {
+            // 获取用户访问的接口路径，比如 /api/v1/files/123
             String path = request.getRequestURI();
             
-            // 需要用户ID但不需要资源权限检查的API路径
-            // 这些API只需要用户身份验证，不需要对特定资源进行权限检查
-            // 控制器方法通过@RequestAttribute("userId")获取用户ID
-            if (path.matches(".*/upload/chunk.*") ||
-                path.matches(".*/upload/merge.*") ||
-                path.matches(".*/upload/status.*") ||
-                path.matches(".*/documents/uploads.*") ||
-                path.matches(".*/documents/accessible.*") ||
-                path.matches(".*/documents/page-preview.*") ||
-                path.matches(".*/search/hybrid.*") ||
+        // 1. 这些API只需要用户身份验证，不用校验某个文件的权限，只需要拿到用户 ID 知道"是谁在操作"即可
+            // 不是访问资源，所以没有"这个文件你该不该看"的问题, 具体操作在其他地方做权限校验 。
+            // 只需要控制器方法通过@RequestAttribute("userId")获取用户ID
+            if (path.matches(".*/upload/chunk.*") ||      // 分片上传 → 数据是用户刚上传的，属于自己
+                path.matches(".*/upload/merge.*") ||       // 合并分片 → 同上
+                path.matches(".*/upload/status.*") ||      // 上传状态 → 查询的是上传进度，不涉及已有文件
+                path.matches(".*/documents/uploads.*") ||  // 我的文档列表 → 列出我自己的文档
+                path.matches(".*/documents/accessible.*") ||// 可访问文档 → 查询所有我能看的
+                path.matches(".*/documents/page-preview.*") ||// 页面预览 → 预览请求
+                path.matches(".*/search/hybrid.*") ||      // 搜索 → 搜索结果本身就是按权限过滤的。从 Token 提取 userId，存入 request 属性后放行
                 (path.matches(".*/documents/[a-fA-F0-9]{32}.*") &&
-                        ("DELETE".equals(request.getMethod()) || "POST".equals(request.getMethod())))) {
-                
+                ("DELETE".equals(request.getMethod()) || "POST".equals(request.getMethod()))))
+                // 删除/重建索引 → 这些操作在其他地方做权限校验
+            {    
+                // 日志：打印当前是什么操作
                 String operation = "未知操作";
                 if (path.contains("/chunk")) {
                     operation = "分片上传";
@@ -90,7 +93,7 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
                 
                 logger.info("处理{}请求: {}", operation, path);
                 
-                // 将用户ID和角色设置为请求属性，供控制器方法使用
+                // 将用户ID和角色设置为请求属性，供控制器方法使用 @RequestAttribute("userId") String userId获取，不需要再解析token
                 String token = extractToken(request);
                 if (token != null) {
                     String userId = jwtUtils.extractUserIdFromToken(token);
@@ -112,13 +115,14 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
                 return;
             }
             
+        // 2.必须校验资源权限
             boolean isChunkUpload = path.matches(".*/upload/chunk.*");
             logger.debug("请求路径: {}, 是否为分片上传: {}", path, isChunkUpload);
             
-            // 获取路径中的资源ID
+            // 获取路径中的资源ID, eg: /upload/chunk/12 -> 12
             String resourceId = extractResourceIdFromPath(request);
             
-            // 如果URL不含资源ID，直接放行
+            // 如果URL不含资源ID，直接放行， 没访问资源就不用管
             if (resourceId == null) {
                 logger.debug("未找到资源ID，直接放行");
                 filterChain.doFilter(request, response);
@@ -135,16 +139,17 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
                 return;
             }
             
-            // 如果资源未找到，返回404
+            // 如果资源未找到，直接拦截请求，返回 404，阻止调用 filterChain.doFilter()继续传递 
             if (resourceInfo == null) {
                 logger.debug("资源未找到，返回404: {}", resourceId);
                 response.setStatus(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
             
+            // 检查资源是否公开访问
             String resourceOrgTag = resourceInfo.getOrgTag();
             
-            // 如果是公开资源、资源没有组织标签、或属于默认组织，直接放行
+            // 如果是公开资源、资源没有组织标签、或属于默认组织，能访问直接放行
             if (resourceInfo.isPublic() || 
                 resourceOrgTag == null || 
                 resourceOrgTag.isEmpty() || 
@@ -154,6 +159,7 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
                 return;
             }
             
+            // 检查用户是否有权限访问该资源
             // 从请求头获取token
             String token = extractToken(request);
             if (token == null) {
@@ -273,6 +279,7 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
         Optional<FileUpload> fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(resourceId);
         if (fileUpload.isPresent()) {
             FileUpload file = fileUpload.get();
+       
             ResourceInfo info = new ResourceInfo(
                 file.getUserId(),
                 file.getOrgTag(),
@@ -327,8 +334,11 @@ public class OrgTagAuthorizationFilter extends OncePerRequestFilter {
      * 资源信息类，用于封装资源的权限相关信息
      */
     private static class ResourceInfo {
+        // 资源的拥有者ID
         private final String owner;
+        // 资源的组织标签
         private final String orgTag;
+        // 是否公开
         private final boolean isPublic;
         
         public ResourceInfo(String owner, String orgTag, boolean isPublic) {

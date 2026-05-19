@@ -15,7 +15,7 @@ import java.util.Optional;
 /**
  * 请求工具类
  *
- * @author YiHui
+ * @author Claude
  * @date 2026/03/18
  */
 @Slf4j

@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 /**
  * 微信支付配置
  *
- * @author YiHui
+ * @author Claude
  * @date 2026/3/18
  */
 @Data

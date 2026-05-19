@@ -203,6 +203,7 @@ public class UserService {
             
             // 创建默认 组织标签
             OrganizationTag defaultTag = new OrganizationTag();
+            // 创建 DEFAULT 标签
             defaultTag.setTagId(DEFAULT_ORG_TAG);
             defaultTag.setName(DEFAULT_ORG_NAME);
             defaultTag.setDescription(DEFAULT_ORG_DESCRIPTION);
@@ -385,7 +386,7 @@ public class UserService {
        
         // 同时清除有效标签缓存
         // 键2: user:effective_org_tags:jack 值: ["PRIVATE_jack", "后端组", "技术部", "公司", "DEFAULT"] 复杂 - 需要递归查询所有父标签
-        // 有效标签需要"递归计算"父标签，不只是简单加上 orgTags，直接在下次查询是计算。
+        // 有效标签需要"递归计算"父标签eg:  技术部 是后端组的父标签，所以技术部也必须在结果中，不只是简单加上 orgTags，直接在下次查询时计算。
         orgTagCacheService.deleteUserEffectiveTagsCache(user.getUsername()); // 3. 删除旧的有效标签缓存
         
         if (user.getPrimaryOrg() != null && !user.getPrimaryOrg().isEmpty()) {

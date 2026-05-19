@@ -72,7 +72,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     response.setHeader("New-Token", newToken);
                 }
                 
-                // 设置用户认证信息
+                // 将通过 JWT 验证的用户信息存入 SecurityContextHolder
                 if (username != null && !username.isEmpty()) {
                     UserDetails userDetails = userDetailsService.loadUserByUsername(username);
                     // 把通过 JWT 验证的用户，包装成 Spring Security 能识别的「认证对象」，并存入安全上下文
@@ -83,7 +83,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     // 设置认证对象的详细信息（如请求来源IP、会话ID等），增强安全性
                     authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
 
-                    //【最关键】将认证对象存入Spring安全上下文,存进去之后，任何地方都能获取当前登录用户,比如@PreAuthorize("hasRole('ADMIN')")
+                    //【最关键】将认证对象存入Spring安全上下文,存进去之后，任何地方都能获取当前登录用户
+                    // 保证在SecurityConfig不会被拦截: 如hasRole("ADMIN") / 方法上的@PreAuthorize("hasRole('ADMIN')")，都能正确识别用户的角色和权限
+                    // (Spring Security 会自动从 SecurityContextHolder 中获取认证对象，检查用户角色和权限。)
                     SecurityContextHolder.getContext().setAuthentication(authentication);
                 }
             }

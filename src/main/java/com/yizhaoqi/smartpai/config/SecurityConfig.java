@@ -43,7 +43,7 @@ public class SecurityConfig {
         try {
             // 禁用CSRF保护
             http.csrf(csrf -> csrf.disable())
-                    // 配置请求的授权规则
+                    // 1.Spring Security 本身的配置,配置请求的授权规则( Spring Security内置过滤器最后执行)
                     .authorizeHttpRequests(authorize -> authorize
                             // 允许静态资源访问
                             .requestMatchers("/", "/test.html", "/static/test.html", "/static/**", "/*.js", "/*.css", "/*.ico").permitAll()
@@ -73,7 +73,7 @@ public class SecurityConfig {
                             .requestMatchers("/api/v1/users/primary-org").hasAnyRole("USER", "ADMIN")
                             // 其他请求需要认证
                             .anyRequest().authenticated())
-                    // 2.搭建好过滤器的执行顺序
+                    // 2.搭建好过滤器的执行顺序(第二层细粒度权限 )
                     // 配置会话管理策略
                     // 设置会话创建策略为STATELESS，表示不会创建会话，通常用于无状态的API应用
                     .sessionManagement(session -> session

@@ -14,6 +14,7 @@ import java.util.Set;
 
 @Repository
 public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
+    //根据 fileMd5 查询，只取第一条最新数据
     Optional<FileUpload> findFirstByFileMd5OrderByCreatedAtDesc(String fileMd5);
 
     List<FileUpload> findAllByFileMd5(String fileMd5);
