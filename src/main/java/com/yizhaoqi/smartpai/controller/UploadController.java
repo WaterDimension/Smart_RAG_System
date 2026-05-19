@@ -24,7 +24,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-
+/**
+ * 文件上传控制器，提供分片上传、获取上传状态和合并文件分片的接口
+ */
 @RestController
 @RequestMapping("/api/v1/upload")
 public class UploadController {
@@ -92,7 +94,8 @@ public class UploadController {
                 
                 LogUtils.logBusiness("UPLOAD_CHUNK", userId, "文件类型验证结果: fileName=%s, valid=%s, fileType=%s, message=%s", 
                         fileName, validationResult.isValid(), validationResult.getFileType(), validationResult.getMessage());
-                
+
+                // 如果文件类型不合法，记录日志并返回错误响应
                 if (!validationResult.isValid()) {
                     LogUtils.logBusinessError("UPLOAD_CHUNK", userId, "文件类型验证失败: fileName=%s, fileType=%s", 
                             new RuntimeException(validationResult.getMessage()), fileName, validationResult.getFileType());
@@ -108,12 +111,13 @@ public class UploadController {
             }
             
             String fileType = getFileType(fileName);
-            String contentType = file.getContentType();
+            String contentType = file.getContentType(); // 浏览器告诉我这个文件的MIME类型
             
             LogUtils.logBusiness("UPLOAD_CHUNK", userId, "接收到分片上传请求: fileMd5=%s, chunkIndex=%d, fileName=%s, fileType=%s, contentType=%s, fileSize=%d, totalSize=%d, orgTag=%s, isPublic=%s", 
                     fileMd5, chunkIndex, fileName, fileType, contentType, file.getSize(), totalSize, orgTag, isPublic);
-        
-            // 如果未指定组织标签，则获取用户的主组织标签
+
+            // 确定这个人属于哪个组织
+            // 如果未指定 组织标签，则获取用户的主组织标签
             if (orgTag == null || orgTag.isEmpty()) {
                 try {
                     LogUtils.logBusiness("UPLOAD_CHUNK", userId, "组织标签未指定，尝试获取用户主组织标签: fileName=%s", fileName);
@@ -130,10 +134,16 @@ public class UploadController {
                 }
             }
 
+            // 检查有没有权利传这么大的文件
             if (!userService.isAdminUser(userId)) {
+                // 获取组织的上传大小限制
                 OrganizationTag uploadOrg = userService.getOrganizationTag(orgTag);
-                Long uploadMaxSizeBytes = uploadOrg.getUploadMaxSizeBytes();
+                Long uploadMaxSizeBytes = uploadOrg.getUploadMaxSizeBytes(); // 这个组织最多能传多大
+                // 估算已经传了多少(前面完整分片的总大小 + 当前分片的大小)
                 long estimatedUploadedBytes = (long) chunkIndex * DEFAULT_CHUNK_SIZE_BYTES + file.getSize();
+                // 两种情况超过限制：
+                // 1. 文件总大小超过限制（totalSize > uploadMaxSizeBytes）
+                // 2. 当前已传大小超过限制（estimatedUploadedBytes > uploadMaxSizeBytes）
                 boolean exceedsLimit = uploadMaxSizeBytes != null
                         && uploadMaxSizeBytes > 0
                         && (totalSize > uploadMaxSizeBytes || estimatedUploadedBytes > uploadMaxSizeBytes);
@@ -153,7 +163,8 @@ public class UploadController {
             }
         
             LogUtils.logFileOperation(userId, "UPLOAD_CHUNK", fileName, fileMd5, "PROCESSING");
-        
+
+            // 上传分片
             uploadService.uploadChunk(fileMd5, chunkIndex, totalSize, fileName, file, orgTag, isPublic, userId);
             
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
@@ -272,13 +283,15 @@ public class UploadController {
             
             // 检查文件完整性和权限
             LogUtils.logBusiness("MERGE_FILE", userId, "检查文件记录和权限: fileMd5=%s, fileName=%s", request.fileMd5(), request.fileName());
+            // 1.查文件记录:一个文件可能被同一个人多次上传，取最新一条记录
             FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                     .orElseThrow(() -> {
                         LogUtils.logUserOperation(userId, "MERGE_FILE", request.fileMd5(), "FAILED_FILE_NOT_FOUND");
                         return new RuntimeException("文件记录不存在");
                     });
-                    
-            // 确保用户有权限操作该文件
+
+            // 2.权限校验 + 状态检查
+            // 确保用户只能操作自己的文件
             if (!fileUpload.getUserId().equals(userId)) {
                 LogUtils.logUserOperation(userId, "MERGE_FILE", request.fileMd5(), "FAILED_PERMISSION_DENIED");
                 LogUtils.logBusiness("MERGE_FILE", userId, "权限验证失败: 尝试合并不属于自己的文件, fileMd5=%s, fileName=%s, 实际所有者=%s", 
@@ -289,20 +302,20 @@ public class UploadController {
                 errorResponse.put("message", "没有权限操作此文件");
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).body(errorResponse);
             }
-
+            // 如果已经合并完了 → 幂等返回，不用重复合并
             if (fileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {
                 LogUtils.logBusiness("MERGE_FILE", userId, "文件已完成合并，按幂等成功返回: fileMd5=%s, fileName=%s", request.fileMd5(), request.fileName());
                 monitor.end("文件已完成合并");
                 return buildAlreadyMergedResponse(request.fileMd5());
             }
-
+            // 如果正在合并中 → 拒绝（防止并发重复合并）
             if (fileUpload.getStatus() == FileUpload.STATUS_MERGING) {
                 throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
             }
             
             LogUtils.logBusiness("MERGE_FILE", userId, "权限验证通过，开始合并文件: fileMd5=%s, fileName=%s, fileType=%s", request.fileMd5(), request.fileName(), fileType);
-            
-            // 检查分片是否全部上传完成
+
+            // 3：检查分片是否全部上传完成
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(request.fileMd5(), userId);
             int totalChunks = uploadService.getTotalChunks(request.fileMd5(), userId);
             LogUtils.logBusiness("MERGE_FILE", userId, "分片上传状态: fileMd5=%s, fileName=%s, 已上传=%d/%d", 
@@ -316,21 +329,28 @@ public class UploadController {
                 errorResponse.put("message", "文件分片未全部上传，无法合并");
                 return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
             }
-
+            // 4. CAS 状态机: 防重复合并
+            //两个用户同时点合并同一个文件，只有一个能 CAS 成功，另一个返回冲突tranctional回滚。
+            /**
+                1. 先检查它现在的状态是不是 0（上传中）
+                2. 如果是 → 允许修改，把状态改成 2（合并中），返回 更新了1行
+                3. 如果不是（已经是合并中/已完成）→ 不修改，返回 更新了0行
+             */
             int updatedRows = fileUploadRepository.updateStatusIfCurrent(
                     fileUpload.getId(),
-                    FileUpload.STATUS_UPLOADING,
-                    FileUpload.STATUS_MERGING
+                    FileUpload.STATUS_UPLOADING, // 旧状态 = 0
+                    FileUpload.STATUS_MERGING    // 新状态 = 2
             );
             if (updatedRows == 0) {
+                // CAS 失败 → 重新查最新状态
                 FileUpload latestFileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                         .orElseThrow(() -> new RuntimeException("文件记录不存在"));
-                if (latestFileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {
+                if (latestFileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {   // 已经被别人合并完了
                     LogUtils.logBusiness("MERGE_FILE", userId, "文件已被其他请求合并完成，按幂等成功返回: fileMd5=%s, fileName=%s", request.fileMd5(), request.fileName());
                     monitor.end("文件已完成合并");
                     return buildAlreadyMergedResponse(request.fileMd5());
                 }
-                if (latestFileUpload.getStatus() == FileUpload.STATUS_MERGING) {
+                if (latestFileUpload.getStatus() == FileUpload.STATUS_MERGING) {   // 别人正在合并
                     throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
                 }
                 throw new CustomException("文件状态已变化，请刷新后重试", HttpStatus.CONFLICT);
@@ -339,8 +359,9 @@ public class UploadController {
             fileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                     .orElseThrow(() -> new RuntimeException("文件记录不存在"));
 
-            // 合并文件
+
             LogUtils.logBusiness("MERGE_FILE", userId, "开始合并文件分片: fileMd5=%s, fileName=%s, fileType=%s, 分片数量=%d", request.fileMd5(), request.fileName(), fileType, totalChunks);
+            // 5.真正合并文件
             String objectUrl;
             try {
                 objectUrl = uploadService.mergeChunks(request.fileMd5(), request.fileName(), userId);

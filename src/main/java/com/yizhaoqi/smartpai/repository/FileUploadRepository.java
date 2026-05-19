@@ -80,9 +80,9 @@ public interface FileUploadRepository extends JpaRepository<FileUpload, Long> {
     List<FileUpload> findByFileMd5In(List<String> md5List);
 
     @Transactional
-    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Modifying(flushAutomatically = true, clearAutomatically = true)    //标记这是【修改/更新】操作；flushAutomatically = true：改完立刻同步到数据库；clearAutomatically = true：清除缓存，保证拿到最新数据
     @Query("UPDATE FileUpload f SET f.status = :newStatus WHERE f.id = :id AND f.status = :currentStatus")
     int updateStatusIfCurrent(@Param("id") Long id,
-                              @Param("currentStatus") int currentStatus,
-                              @Param("newStatus") int newStatus);
+                              @Param("currentStatus") int currentStatus,  // 当前必须是什么状态
+                              @Param("newStatus") int newStatus);       //要改成的状态
 }

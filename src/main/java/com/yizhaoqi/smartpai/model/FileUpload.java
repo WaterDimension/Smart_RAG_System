@@ -15,13 +15,13 @@ import java.time.LocalDateTime;
 @Entity
 @Table(name = "file_upload")
 public class FileUpload {
-    public static final int STATUS_UPLOADING = 0;
-    public static final int STATUS_COMPLETED = 1;
-    public static final int STATUS_MERGING = 2;
-    public static final String VECTORIZATION_STATUS_PENDING = "PENDING";
-    public static final String VECTORIZATION_STATUS_PROCESSING = "PROCESSING";
-    public static final String VECTORIZATION_STATUS_COMPLETED = "COMPLETED";
-    public static final String VECTORIZATION_STATUS_FAILED = "FAILED";
+    public static final int STATUS_UPLOADING = 0;  // 文件正在上传中
+    public static final int STATUS_COMPLETED = 1;  // 文件上传已完成
+    public static final int STATUS_MERGING = 2;    // 文件正在合并中
+    public static final String VECTORIZATION_STATUS_PENDING = "PENDING";          // 向量化待处理
+    public static final String VECTORIZATION_STATUS_PROCESSING = "PROCESSING";    // 向量化处理中
+    public static final String VECTORIZATION_STATUS_COMPLETED = "COMPLETED";      // 向量化已完成
+    public static final String VECTORIZATION_STATUS_FAILED = "FAILED";            // 向量化失败
 
     /**
      * 文件的唯一标识符
