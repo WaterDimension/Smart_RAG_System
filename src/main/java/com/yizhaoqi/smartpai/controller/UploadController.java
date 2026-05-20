@@ -429,7 +429,7 @@ public class UploadController {
              *  2.解析文件内容，抽取文本
              *  3.切文本成块
              *  4.调用Embedding api 向量化文档。（最耗时）
-             *  5.存入ess，供后续检索使用
+             *  5.存入es，供后续检索使用
              */
             LogUtils.logBusiness("MERGE_FILE", userId, "创建文件处理任务: fileMd5=%s, fileName=%s, fileType=%s, orgTag=%s, isPublic=%s", 
                     request.fileMd5(), request.fileName(), fileType, fileUpload.getOrgTag(), fileUpload.isPublic());
