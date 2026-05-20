@@ -20,6 +20,8 @@ import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
+
+import javax.swing.Spring;
 /**
  * Kafka 配置类
  * 用于配置 Kafka 生产者和消费者，以及主题（topic）的分区和复制因子。3个主题：file-processing, file-processing-dlt, file-processing-dlt-merged
@@ -61,11 +63,14 @@ public class KafkaConfig {
         return fileProcessingGroupId;
     }
 
+    // 主题自动创建
+    // 如果主题不存在，Spring 启动时自动在 Kafka Broker 上创建它。
+    // 分区数和复制因子根据配置文件中的设置进行配置。
     @Bean
     public NewTopic fileProcessingNewTopic() {
-        return TopicBuilder.name(fileProcessingTopic)
-                .partitions(topicPartitions)
-                .replicas(topicReplicationFactor)
+        return TopicBuilder.name(fileProcessingTopic)       // 从配置读取主题：file-processing
+                .partitions(topicPartitions) // 分区数
+                .replicas(topicReplicationFactor) // 复制因子
                 .build();
     }
 
@@ -84,10 +89,11 @@ public class KafkaConfig {
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
-        // 可靠投递配置
-        config.put(ProducerConfig.ACKS_CONFIG, "all"); // 全部 ISR 落盘才确认
-        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // 幂等生产者
-        config.put(ProducerConfig.RETRIES_CONFIG, 3); // 自动重试 3 次
+
+        // 可靠投递配置（消息至少投递一次（At-least-once） ，且不会因为重试导致重复消息。）
+        config.put(ProducerConfig.ACKS_CONFIG, "all"); // 所有副本都确认才返回成功
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // 幂等生产，防重复
+        config.put(ProducerConfig.RETRIES_CONFIG, 3); // 发送失败，自动重试 3 次
 
         DefaultKafkaProducerFactory<String, Object> factory = new DefaultKafkaProducerFactory<>(config);
         // 设置事务前缀，启用事务能力
@@ -100,6 +106,7 @@ public class KafkaConfig {
         return new KafkaTemplate<>(producerFactory());
     }
 
+    // 消费者配置 — 死信队列 + 重试
     @Bean
     public ConsumerFactory<String, Object> consumerFactory() {
         Map<String, Object> config = new HashMap<>();
@@ -118,6 +125,7 @@ public class KafkaConfig {
             ConsumerFactory<String, Object> consumerFactory,
             KafkaTemplate<String, Object> kafkaTemplate) {
         // 当重试失败后，消息发送至 file-processing-dlt 主题，分区与原消息保持一致
+  
         DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
                 kafkaTemplate,
                 (record, ex) -> new TopicPartition(fileProcessingDltTopic, record.partition()));

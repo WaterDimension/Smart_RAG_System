@@ -38,22 +38,26 @@ public class FileProcessingConsumer {
         this.documentService = documentService;
     }
 
-    @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}", groupId = "#{kafkaConfig.getFileProcessingGroupId()}")
+    // @KafkaListener 监听
+    @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}",   // SpEL 表达式#{}动态解析主题名
+    groupId = "#{kafkaConfig.getFileProcessingGroupId()}")              // 消费者组 ID
     public void processTask(FileProcessingTask task) {
         log.info("Received task: {}", task);
         log.info("文件权限信息: userId={}, orgTag={}, isPublic={}", 
                 task.getUserId(), task.getOrgTag(), task.isPublic());
 
+        // 标记为处理中，避免重复处理
         documentService.markVectorizationProcessing(task.getFileMd5(), false);
 
+        // 判断任务类型
         if (FileProcessingTask.TASK_TYPE_REINDEX.equals(task.getTaskType())) {
             processReindexTask(task);
-            return;
+            return;  // 重建索引走不同路径
         }
 
         InputStream fileStream = null;
         try {
-            // 下载文件
+            // 通过HTTP下载 MinIO 中的合并文件
             fileStream = downloadFileFromStorage(task.getFilePath());
             // 在 downloadFileFromStorage 返回后立即检查流是否可读
             if (fileStream == null) {
@@ -65,12 +69,12 @@ public class FileProcessingConsumer {
                 fileStream = new BufferedInputStream(fileStream);
             }
 
-            // 解析文件
+            // 解析文件（提取文本 + 分块）
             parseService.parseAndSave(task.getFileMd5(), fileStream, 
                     task.getUserId(), task.getOrgTag(), task.isPublic());
             log.info("文件解析完成，fileMd5: {}", task.getFileMd5());
 
-            // 向量化处理
+            // 向量化处理（生成 Embedding + 存入 ES）
             VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
                     task.getFileMd5(),
                     task.getUserId(),
@@ -78,6 +82,8 @@ public class FileProcessingConsumer {
                     task.isPublic(),
                     task.getUserId()
             );
+
+            // 标记完成
             documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
             log.info("向量化完成，fileMd5: {}", task.getFileMd5());
         } catch (Exception e) {

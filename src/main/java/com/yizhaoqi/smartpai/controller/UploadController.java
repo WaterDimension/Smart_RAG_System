@@ -437,8 +437,8 @@ public class UploadController {
             // 1.创建消息对象
             FileProcessingTask task = new FileProcessingTask(
                     request.fileMd5(),
-                    objectUrl,
-                    request.fileName(),
+                    objectUrl,               // MinIO 预签名 URL
+                    request.fileName(),      // 文件名
                     fileUpload.getUserId(),
                     fileUpload.getOrgTag(),
                     fileUpload.isPublic(),
@@ -456,7 +456,9 @@ public class UploadController {
             LogUtils.logBusiness("MERGE_FILE", userId, "发送文件处理任务到Kafka(事务): topic=%s, fileMd5=%s, fileName=%s", 
                     kafkaConfig.getFileProcessingTopic(), request.fileMd5(), request.fileName());
 
+            // executeInTransaction 开启 Kafka 事务，确保消息发送成功
             kafkaTemplate.executeInTransaction(kt -> {
+                //kt.send() 序列化消息并发送到 Kafka 主题 file-processing
                 kt.send(kafkaConfig.getFileProcessingTopic(), task);
                 return true;
             });

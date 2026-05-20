@@ -12,6 +12,9 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 @NoArgsConstructor
 public class FileProcessingTask {
+    /**
+        两种任务类型：UPLOAD_PROCESS用户上传文件后合并 和 REINDEX管理员手动触发重建索引
+    */
     public static final String TASK_TYPE_UPLOAD_PROCESS = "UPLOAD_PROCESS";
     public static final String TASK_TYPE_REINDEX = "REINDEX";
 

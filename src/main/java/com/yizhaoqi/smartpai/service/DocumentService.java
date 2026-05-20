@@ -279,7 +279,7 @@ public class DocumentService {
     }
 
     private void markVectorizationProcessing(FileUpload fileUpload, boolean resetActualUsage) {
-        fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);
+        fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);   // 标记为处理中
         fileUpload.setVectorizationErrorMessage(null);
         if (resetActualUsage) {
             fileUpload.setActualEmbeddingTokens(null);
