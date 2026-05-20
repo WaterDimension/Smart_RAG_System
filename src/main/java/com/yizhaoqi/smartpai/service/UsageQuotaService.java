@@ -263,11 +263,14 @@ public class UsageQuotaService {
 
         int total = 0;
         for (String text : texts) {
+            // 每条文本前后各有一个起始和结束标记，合计4个token
             total += estimateTextTokens(text) + 4;
         }
         return (int) Math.ceil(total * 1.15d);
     }
 
+
+    // 基于字符类型的启发式文本token估算，适用于多语言文本，尤其是中英文混合场景
     public int estimateTextTokens(String text) {
         if (text == null || text.isBlank()) {
             return 0;

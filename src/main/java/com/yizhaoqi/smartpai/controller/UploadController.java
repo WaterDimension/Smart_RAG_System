@@ -84,10 +84,16 @@ public class UploadController {
             @RequestParam(value = "isPublic", required = false, defaultValue = "false") boolean isPublic,
             @RequestParam("file") MultipartFile file,
             @RequestAttribute("userId") String userId) throws IOException {
-        
+        /*
+            ① 文件类型校验         ──→ 只有 chunkIndex==0（第一个分片）时校验
+            ② 组织标签确定         ──→ 未指定则:用户主组织
+            ③ 上传大小限制检查      ──→ 只对非管理员
+            ④ 调用 UploadService   ──→ 真正的上传逻辑
+
+         */
         LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("UPLOAD_CHUNK");
         try {
-            // 文件类型验证（仅在第一个分片时进行验证）
+            // 1.文件类型验证
             if (chunkIndex == 0) {
                 FileTypeValidationService.FileTypeValidationResult validationResult = 
                     fileTypeValidationService.validateFileType(fileName);
@@ -116,7 +122,7 @@ public class UploadController {
             LogUtils.logBusiness("UPLOAD_CHUNK", userId, "接收到分片上传请求: fileMd5=%s, chunkIndex=%d, fileName=%s, fileType=%s, contentType=%s, fileSize=%d, totalSize=%d, orgTag=%s, isPublic=%s", 
                     fileMd5, chunkIndex, fileName, fileType, contentType, file.getSize(), totalSize, orgTag, isPublic);
 
-            // 确定这个人属于哪个组织
+            // 2.组织标签验证
             // 如果未指定 组织标签，则获取用户的主组织标签
             if (orgTag == null || orgTag.isEmpty()) {
                 try {
@@ -134,7 +140,7 @@ public class UploadController {
                 }
             }
 
-            // 检查有没有权利传这么大的文件
+            // 3.检查有没有权利传这么大的文件(管理员没限制)
             if (!userService.isAdminUser(userId)) {
                 // 获取组织的上传大小限制
                 OrganizationTag uploadOrg = userService.getOrganizationTag(orgTag);
@@ -143,7 +149,7 @@ public class UploadController {
                 long estimatedUploadedBytes = (long) chunkIndex * DEFAULT_CHUNK_SIZE_BYTES + file.getSize();
                 // 两种情况超过限制：
                 // 1. 文件总大小超过限制（totalSize > uploadMaxSizeBytes）
-                // 2. 当前已传大小超过限制（estimatedUploadedBytes > uploadMaxSizeBytes）
+                // 2. 当前已传大小超过限制（estimatedUploadedBytes > uploadMaxSizeBytes）防止分片太多累计超出, 兜底
                 boolean exceedsLimit = uploadMaxSizeBytes != null
                         && uploadMaxSizeBytes > 0
                         && (totalSize > uploadMaxSizeBytes || estimatedUploadedBytes > uploadMaxSizeBytes);
@@ -164,7 +170,7 @@ public class UploadController {
         
             LogUtils.logFileOperation(userId, "UPLOAD_CHUNK", fileName, fileMd5, "PROCESSING");
 
-            // 上传分片
+            // 4.上传分片
             uploadService.uploadChunk(fileMd5, chunkIndex, totalSize, fileName, file, orgTag, isPublic, userId);
             
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
@@ -230,7 +236,8 @@ public class UploadController {
             }
             
             LogUtils.logBusiness("GET_UPLOAD_STATUS", "system", "获取文件上传状态: fileMd5=%s, fileName=%s, fileType=%s", fileMd5, fileName, fileType);
-            
+
+            //得到已上传分片的chunkIndex
             List<Integer> uploadedChunks = uploadService.getUploadedChunks(fileMd5, userId);
             int totalChunks = uploadService.getTotalChunks(fileMd5, userId);
             double progress = calculateProgress(uploadedChunks, totalChunks);
@@ -274,6 +281,15 @@ public class UploadController {
     public ResponseEntity<Map<String, Object>> mergeFile(
             @RequestBody MergeRequest request,
             @RequestAttribute("userId") String userId) {
+        /**
+         * ① 权限校验          ──→ 只能合并自己的文件
+         * ② 状态检查          ──→ COMPLETED（幂等返回） / MERGING（拒绝）
+         * ③ 分片完整度检查     ──→ getUploadedChunks() 数量 >= totalChunks
+         * ④ CAS 状态更新       ──→ UPLOADING → MERGING（原子操作）
+         * ⑤ 真正合并          ──→ UploadService.mergeChunks()
+         * ⑥ Embedding 预估    ──→ ParseService.estimateEmbeddingUsage()
+         * ⑦ Kafka 发送        ──→ FileProcessingTask
+         */
         
         LogUtils.PerformanceMonitor monitor = LogUtils.startPerformanceMonitor("MERGE_FILE");
         try {
@@ -320,7 +336,8 @@ public class UploadController {
             int totalChunks = uploadService.getTotalChunks(request.fileMd5(), userId);
             LogUtils.logBusiness("MERGE_FILE", userId, "分片上传状态: fileMd5=%s, fileName=%s, 已上传=%d/%d", 
                     request.fileMd5(), request.fileName(), uploadedChunks.size(), totalChunks);
-            
+
+            // 确保所有分片都在
             if (uploadedChunks.size() < totalChunks) {
                 LogUtils.logUserOperation(userId, "MERGE_FILE", request.fileMd5(), "FAILED_INCOMPLETE_CHUNKS");
                 monitor.end("合并失败：分片未全部上传");
@@ -339,10 +356,10 @@ public class UploadController {
             int updatedRows = fileUploadRepository.updateStatusIfCurrent(
                     fileUpload.getId(),
                     FileUpload.STATUS_UPLOADING, // 旧状态 = 0
-                    FileUpload.STATUS_MERGING    // 新状态 = 2
+                    FileUpload.STATUS_MERGING    // 新状态 = 2 正在合并
             );
             if (updatedRows == 0) {
-                // CAS 失败 → 重新查最新状态
+                // CAS 失败 → 重新查 文件最新状态
                 FileUpload latestFileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(request.fileMd5(), userId)
                         .orElseThrow(() -> new RuntimeException("文件记录不存在"));
                 if (latestFileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {   // 已经被别人合并完了
@@ -361,11 +378,12 @@ public class UploadController {
 
 
             LogUtils.logBusiness("MERGE_FILE", userId, "开始合并文件分片: fileMd5=%s, fileName=%s, fileType=%s, 分片数量=%d", request.fileMd5(), request.fileName(), fileType, totalChunks);
-            // 5.真正合并文件
+            // 5.真正合并文件, 得到合并后的文件URL
             String objectUrl;
             try {
                 objectUrl = uploadService.mergeChunks(request.fileMd5(), request.fileName(), userId);
             } catch (Exception mergeException) {
+                // 6.合并失败 → 把状态改回 UPLOADING，允许重试
                 fileUploadRepository.updateStatusIfCurrent(fileUpload.getId(), FileUpload.STATUS_MERGING, FileUpload.STATUS_UPLOADING);
                 throw mergeException;
             }
@@ -375,14 +393,18 @@ public class UploadController {
                     .orElseThrow(() -> new RuntimeException("文件记录不存在"));
 
             ParseService.EmbeddingEstimate embeddingEstimate = null;
+            // 7.预估 Embedding 用量
+            // 7.1 从MinIO读取【合并好的完整文件】的流（不下载到本地，直接读内存）
             try (io.minio.GetObjectResponse mergedFileStream = uploadService.getMergedFileStream(request.fileMd5())) {
+                // 7.2 调用 ParseService 进行预估，获取估算向量化所需的 token数和 chunk数
                 embeddingEstimate = parseService.estimateEmbeddingUsage(mergedFileStream);
+                // 7.3把预估结果返回数据库
                 fileUpload.setEstimatedEmbeddingTokens(embeddingEstimate.estimatedTokens());
                 fileUpload.setEstimatedChunkCount(embeddingEstimate.estimatedChunkCount());
                 fileUploadRepository.save(fileUpload);
                 LogUtils.logBusiness(
                         "MERGE_FILE",
-                        userId,
+                        userId,          // MinIO 预签名 URL
                         "文档 Embedding 预估完成: fileMd5=%s, estimatedTokens=%d, estimatedChunkCount=%d",
                         request.fileMd5(),
                         embeddingEstimate.estimatedTokens(),
@@ -399,10 +421,20 @@ public class UploadController {
                 );
             }
 
-            // 发送任务到 Kafka，包含完整的权限信息
+            //文件确实在 MinIO 合并完成了，但 还得继续  解析和向量化（非常耗时）
+
+            // 8.发送任务到 Kafka，包含完整的权限信息. 然后就能立即响应前端
+            /**
+             *  1.通过 HTTP 从 MinIO 拉下来
+             *  2.解析文件内容，抽取文本
+             *  3.切文本成块
+             *  4.调用Embedding api 向量化文档。（最耗时）
+             *  5.存入ess，供后续检索使用
+             */
             LogUtils.logBusiness("MERGE_FILE", userId, "创建文件处理任务: fileMd5=%s, fileName=%s, fileType=%s, orgTag=%s, isPublic=%s", 
                     request.fileMd5(), request.fileName(), fileType, fileUpload.getOrgTag(), fileUpload.isPublic());
-            
+
+            // 1.创建消息对象
             FileProcessingTask task = new FileProcessingTask(
                     request.fileMd5(),
                     objectUrl,
@@ -414,7 +446,8 @@ public class UploadController {
                     userId
             );
 
-            fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);
+            // 2.更新状态为 "处理中"，并清除之前的向量化结果（如果有的话），防止旧数据干扰新的处理流程
+            fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);     //向量化中
             fileUpload.setVectorizationErrorMessage(null);
             fileUpload.setActualEmbeddingTokens(null);
             fileUpload.setActualChunkCount(null);
@@ -422,6 +455,7 @@ public class UploadController {
             
             LogUtils.logBusiness("MERGE_FILE", userId, "发送文件处理任务到Kafka(事务): topic=%s, fileMd5=%s, fileName=%s", 
                     kafkaConfig.getFileProcessingTopic(), request.fileMd5(), request.fileName());
+
             kafkaTemplate.executeInTransaction(kt -> {
                 kt.send(kafkaConfig.getFileProcessingTopic(), task);
                 return true;

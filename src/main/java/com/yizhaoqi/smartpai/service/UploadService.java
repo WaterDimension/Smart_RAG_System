@@ -67,9 +67,16 @@ public class UploadService {
      * @param userId 上传用户ID
      * @throws IOException 如果文件读取失败
      */
+    /*
+          ① getOrCreateFileUpload()   →  MySQL 文件记录
+          ② isChunkUploaded()         →  Redis Bitmap 断点续传
+          ③ MinIO upload              →  实际存储
+          ④ saveChunkInfo()           →  MySQL 持久化
+          ⑤ markChunkUploaded()       →  Redis 标记
+     */
     public void uploadChunk(String fileMd5, int chunkIndex, long totalSize, String fileName, 
                            MultipartFile file, String orgTag, boolean isPublic, String userId) throws IOException {
-        // 1. === 参数验证和日志记录 ===
+
         String fileType = getFileType(fileName);
         String contentType = file.getContentType();
         
@@ -77,24 +84,27 @@ public class UploadService {
                    fileMd5, chunkIndex, totalSize, fileName, fileType, contentType, file.getSize(), orgTag, isPublic, userId);
         
         try {
-        // 2. === 断点续传的关键：检查是否已上传 ===
-            FileUpload fileUpload = getOrCreateFileUpload(fileMd5, totalSize, fileName, orgTag, isPublic, userId, fileType);
+        //    === 断点续传的关键：检查文件是否已上传 ===
+            // 1. 创建/获取文件记录
+            FileUpload fileUpload = getOrCreateFileUpload(fileMd5, totalSize, fileName, orgTag, isPublic, userId, fileType);   //获取文件记录
             logger.debug("检查文件记录是否存在 => fileMd5: {}, fileName: {}, fileType: {}, status: {}", fileMd5, fileName, fileType, fileUpload.getStatus());
 
+            // 2. 状态检查
             if (fileUpload.getStatus() == FileUpload.STATUS_MERGING) {
                 throw new CustomException("文件正在合并中，请稍后重试", HttpStatus.CONFLICT);
             }
             if (fileUpload.getStatus() == FileUpload.STATUS_COMPLETED) {
                 throw new CustomException("文件已完成合并，不允许继续上传分片", HttpStatus.CONFLICT);
             }
-        // 2. === 断点续传的关键：检查是否已上传 ===
-            // Redis Bitmap 是上传进度快路径；数据库是最终可合并的事实来源。
+        //    === 断点续传的核心：检查是否已上传 ===
+            // 3. Redis Bitmap 是上传进度快路径；数据库是最终可合并的事实来源。
             // 幂等性： 检查分片是否已上传
             boolean chunkUploaded = isChunkUploaded(fileMd5, chunkIndex, userId);
             logger.debug("检查分片是否已上传 => fileMd5: {}, fileName: {}, chunkIndex: {}, isUploaded: {}", 
                       fileMd5, fileName, chunkIndex, chunkUploaded);
 
-            // 用 Redis 位图记录分片状态: 已上传 → 直接返回成功，不处理
+            // 用 Redis 位图记录分片状态: 已上传 → 直接返回成功
+            // 正常已上传,Redis 直接命中返回
             if (chunkUploaded) {
                 logger.info("分片已在Redis中标记为已上传，按幂等成功处理 => fileMd5: {}, fileName: {}, fileType: {}, chunkIndex: {}", fileMd5, fileName, fileType, chunkIndex);
                 return;
@@ -104,7 +114,7 @@ public class UploadService {
                 logger.info("Redis未命中但数据库已有分片信息，回填Redis后按幂等成功处理 => fileMd5: {}, fileName: {}, chunkIndex: {}", fileMd5, fileName, chunkIndex);
                 // 回填Redis，标记分片为已上传（数据库作为事实来源，Redis作为加速层，失败不影响最终结果）
                 markChunkUploadedQuietly(fileMd5, chunkIndex, userId, fileName);
-                return;
+                return;      // 幂等返回
             }
 
             logger.debug("计算分片MD5 => fileMd5: {}, fileName: {}, chunkIndex: {}", fileMd5, fileName, chunkIndex);
@@ -113,8 +123,8 @@ public class UploadService {
             logger.debug("分片MD5计算完成 => fileMd5: {}, fileName: {}, chunkIndex: {}, chunkMd5: {}",
                        fileMd5, fileName, chunkIndex, chunkMd5);
 
-            // 1. 定义分片在MinIO里的存储路径
-            // 格式：chunks/文件总MD5/分片编号  →  唯一不重复，方便后续合并
+
+            // 1.构建 MinIO 路径：chunks/{文件MD5}/{分片索引}
             String storagePath = "chunks/" + fileMd5 + "/" + chunkIndex;
             logger.debug("构建分片存储路径 => fileName: {}, path: {}", fileName, storagePath);
 
@@ -125,7 +135,7 @@ public class UploadService {
 
                 // 2. 构建上传参数
                 PutObjectArgs putObjectArgs = PutObjectArgs.builder()
-                        .bucket("uploads")         // 桶名称：相当于MinIO的根文件夹（必须提前创建）
+                        .bucket("uploads")         // 桶名：相当于MinIO的根文件夹（必须提前创建）
                         .object(storagePath)             // 分片的存储路径
                         .stream(file.getInputStream(), file.getSize(), -1)
                         .contentType(file.getContentType())
@@ -156,6 +166,7 @@ public class UploadService {
             logger.info("分片信息已保存到数据库 => fileMd5: {}, fileName: {}, chunkIndex: {}", fileMd5, fileName, chunkIndex);
 
             // 4.标记分片为已上传（先数据库后Redis，保证数据一致性，Redis作为加速层）
+            // 用 "Quietly" 版本？ 因为 MySQL 才是权威数据源，Redis 是加速缓存。Redis 设置失败不该阻塞业务流程——下次查询会从 MySQL 回填。 错了打印日志就行，不抛异常了。
             markChunkUploadedQuietly(fileMd5, chunkIndex, userId, fileName);
             
             logger.info("分片处理完成 => fileMd5: {}, fileName: {}, fileType: {}, chunkIndex: {}", fileMd5, fileName, fileType, chunkIndex);
@@ -345,7 +356,7 @@ public class UploadService {
         logger.info("获取已上传分片列表 => fileMd5: {}, userId: {}", fileMd5, userId);
         List<Integer> uploadedChunks = new ArrayList<>();
         try {
-            int totalChunks = getTotalChunks(fileMd5, userId);
+            int totalChunks = getTotalChunks(fileMd5, userId);    // 先算总分片数
             logger.debug("文件总分片数 => fileMd5: {}, userId: {}, totalChunks: {}", fileMd5, userId, totalChunks);
             
             if (totalChunks == 0) {
@@ -356,11 +367,11 @@ public class UploadService {
             // 1. 从 Redis Bitmap 读取所有分片状态
             String redisKey = "upload:" + userId + ":" + fileMd5;
             // 存的是 Bitmap 二进制数据(不是字符串),获取 Redis 的原生连接才能拿到原始字节数组
-            byte[] bitmapData = redisTemplate.execute((RedisCallback<byte[]>) connection -> {
+            byte[] bitmapData = redisTemplate.execute((RedisCallback<byte[]>) connection -> {   // 一次性获取整个 Bitmap
                 return connection.get(redisKey.getBytes());
             });
 
-            // 2. Redis 没有 → 从数据库查（Redis 重启或过期时）
+            // 2. Redis 没有 → 从数据库查 → 回填 Redis
             if (bitmapData == null) {
                 logger.info("Redis中无分片状态记录 => fileMd5: {}, userId: {}", fileMd5, userId);
                 List<Integer> dbUploadedChunks = getUploadedChunksFromDatabase(fileMd5);
@@ -407,6 +418,7 @@ public class UploadService {
             throw new RuntimeException("Failed to get uploaded chunks", e);
         }
     }
+
 
     private List<Integer> getUploadedChunksFromDatabase(String fileMd5) {
         logger.debug("从数据库查询已上传分片列表 => fileMd5: {}", fileMd5);
@@ -536,7 +548,7 @@ public class UploadService {
             logger.info("查询到分片信息 => fileMd5: {}, fileName: {}, fileType: {}, 分片数量: {}", fileMd5, fileName, fileType, chunks.size());
             
             // 检查分片数量是否与预期一致
-            // 又一次查总分片数getTotalChunks
+            // 又一次查总分片数 getTotalChunks
             int expectedChunks = getTotalChunks(fileMd5, userId);
             // 2.校验分片数
             if (chunks.size() != expectedChunks) {
@@ -551,16 +563,16 @@ public class UploadService {
                     .collect(Collectors.toList());
             logger.debug("分片路径列表 => fileMd5: {}, fileName: {}, 路径数量: {}", fileMd5, fileName, partPaths.size());
 
-            // 3.逐个检查各个分片是否存在
+            // 3.逐个检查各个分片在 MinIO 上是否存在
             logger.info("开始检查每个分片是否存在 => fileMd5: {}, fileName: {}, fileType: {}", fileMd5, fileName, fileType);
             for (int i = 0; i < partPaths.size(); i++) {
-                String path = partPaths.get(i);
+                String path = partPaths.get(i);   // "chunks/abc123/0"
                 try {
-                    StatObjectResponse stat = minioClient.statObject(
+                    StatObjectResponse stat = minioClient.statObject(                //statObject 查对象元数据
                         StatObjectArgs.builder()
                             .bucket("uploads")
                             .object(path)   // "chunks/abc123/0", "chunks/abc123/1", ...
-                            .build()
+                            .build()        // 生成查询命令
                     );
                     logger.debug("分片存在 => fileName: {}, index: {}, path: {}, size: {}", fileName, i, path, stat.size());
                 } catch (Exception e) {
@@ -634,7 +646,8 @@ public class UploadService {
                             logger.error("更新文件状态失败，文件记录不存在 => fileMd5: {}, fileName: {}", fileMd5, fileName);
                             return new RuntimeException("文件记录不存在: " + fileMd5);
                         });
-                fileUpload.setStatus(FileUpload.STATUS_COMPLETED);  // 0→1
+
+                fileUpload.setStatus(FileUpload.STATUS_COMPLETED);  // 2→1
                 fileUpload.setMergedAt(LocalDateTime.now());
                 fileUploadRepository.save(fileUpload);
                 logger.info("文件状态已更新为已完成 => fileMd5: {}, fileName: {}, fileType: {}", fileMd5, fileName, fileType);
@@ -659,6 +672,7 @@ public class UploadService {
         }
     }
 
+    // 返回合并好的文件流，供预览或下载使用
     public GetObjectResponse getMergedFileStream(String fileMd5) throws Exception {
         return minioClient.getObject(
                 GetObjectArgs.builder()
@@ -674,7 +688,7 @@ public class UploadService {
                         .method(Method.GET)
                         .bucket("uploads")
                         .object("merged/" + fileMd5)
-                        .expiry(1, TimeUnit.HOURS)
+                        .expiry(1, TimeUnit.HOURS)  // 1小时后失效
                         .build()
         );
     }
@@ -691,6 +705,7 @@ public class UploadService {
         return minioUrl.replaceFirst(minioConfig.getEndpoint(), minioConfig.getPublicUrl());
     }
 
+    // 返回FileUpload, 包含切片的一切信息
     private FileUpload getOrCreateFileUpload(String fileMd5,
                                              long totalSize,
                                              String fileName,
@@ -700,9 +715,10 @@ public class UploadService {
                                              String fileType) {
         Optional<FileUpload> existingFileUpload = fileUploadRepository.findFirstByFileMd5AndUserIdOrderByCreatedAtDesc(fileMd5, userId);
         if (existingFileUpload.isPresent()) {
-            return existingFileUpload.get();
+            return existingFileUpload.get();  //拿到FileUpload
         }
 
+        //第一次上传没记录，创建记录
         logger.info("创建新的文件记录 => fileMd5: {}, fileName: {}, fileType: {}, totalSize: {}, userId: {}, orgTag: {}, isPublic: {}",
                 fileMd5, fileName, fileType, totalSize, userId, orgTag, isPublic);
 
@@ -714,7 +730,7 @@ public class UploadService {
         fileUpload.setUserId(userId);
         fileUpload.setOrgTag(orgTag);
         fileUpload.setPublic(isPublic);
-        fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PENDING);
+        fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PENDING);   // 状态=0（上传中）       CAS操作前提
         fileUpload.setVectorizationErrorMessage(null);
 
         try {

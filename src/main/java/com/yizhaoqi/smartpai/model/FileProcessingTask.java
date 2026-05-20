@@ -6,6 +6,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * 文件处理任务类，用于Kafka消息传递
+ * 把「需要处理的文件信息」打包成一个消息对象
  */
 @Data
 @AllArgsConstructor

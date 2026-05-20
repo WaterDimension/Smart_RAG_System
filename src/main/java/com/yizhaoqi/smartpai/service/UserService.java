@@ -496,6 +496,7 @@ public class UserService {
                     user.setPrimaryOrg(primaryOrg);
                     userRepository.save(user);
                 } else {
+                    // 兜底，数据异常
                     // 如果用户没有任何组织标签，则使用默认标签
                     primaryOrg = DEFAULT_ORG_TAG;
                 }

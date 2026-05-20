@@ -81,7 +81,8 @@ public class ParseService {
             String userId, String orgTag, boolean isPublic) throws IOException, TikaException {
         logger.info("开始流式解析文件，fileMd5: {}, userId: {}, orgTag: {}, isPublic: {}",
                 fileMd5, userId, orgTag, isPublic);
-        
+
+        // 在解析前检查内存使用情况，防止解析大文件时内存不足导致程序崩溃
         checkMemoryThreshold();
 
         try (BufferedInputStream bufferedStream = new BufferedInputStream(fileStream, bufferSize)) {
@@ -111,25 +112,37 @@ public class ParseService {
 
     /**
      * 兼容旧版本的解析方法
+     * 传入文件流，返回【预估Token数 + 预估分片数】
      */
     public void parseAndSave(String fileMd5, InputStream fileStream) throws IOException, TikaException {
         // 使用默认值调用新方法
         parseAndSave(fileMd5, fileStream, "unknown", "DEFAULT", false);
     }
 
+    /**
+     *  传入文件流，返回【预估Token数 + 文本分片数】
+     */
     public EmbeddingEstimate estimateEmbeddingUsage(InputStream fileStream) throws IOException, TikaException {
         logger.info("开始估算文档 Embedding Token");
+        // 1.先检查内存是否足够，防止解析时卡死
         checkMemoryThreshold();
 
+        // 2. 把文件流包装成【缓冲流】→ 读文件更快
         try (BufferedInputStream bufferedStream = new BufferedInputStream(fileStream, bufferSize)) {
+            // 3. 如果是PDF文件 → 走专门的PDF解析逻辑更快
             if (isPdfDocument(bufferedStream)) {
                 return estimatePdfEmbeddingUsage(bufferedStream);
             }
-
+            // 4.非PDF自定义计算器:StreamingEstimateHandler，边读文本边算Token
             StreamingEstimateHandler handler = new StreamingEstimateHandler();
+            // Tika解析需要的固定参数
             Metadata metadata = new Metadata();
             ParseContext context = new ParseContext();
+
+            //Tika万能解析器：自动识别文件类型，边解析边把文本丢给我们写的StreamingEstimateHandler
             AutoDetectParser parser = new AutoDetectParser();
+
+            //核心执行：解析文件文本 → 实时传给handler计算Token → 最后从handler拿到总Token数和总分片数
             parser.parse(bufferedStream, handler, metadata, context);
             return handler.snapshot();
         } catch (SAXException e) {
@@ -138,20 +151,27 @@ public class ParseService {
         }
     }
 
+    // 检查服务器内存是否充足，防止解析大文件把程序搞崩
     private void checkMemoryThreshold() {
+        // 1. 获取Java程序的内存管理器（掌管所有内存的工具）
         Runtime runtime = Runtime.getRuntime();
+
+        // 2. 读取内存的4个核心数据
         long maxMemory = runtime.maxMemory();
         long totalMemory = runtime.totalMemory();
         long freeMemory = runtime.freeMemory();
         long usedMemory = totalMemory - freeMemory;
-        
+
+        // 3. 计算【内存使用率】
         double memoryUsage = (double) usedMemory / maxMemory;
-        
+
+        // 4. 如果内存使用率超过了警戒线0.8
         if (memoryUsage > maxMemoryThreshold) {
             logger.warn("内存使用率过高: {:.2f}%, 触发垃圾回收", memoryUsage * 100);
+            // 主动触发【垃圾回收】：清理程序里没用的对象，腾出内存
             System.gc();
             
-            // 重新检查
+            // 清理完内存，再试一次
             usedMemory = runtime.totalMemory() - runtime.freeMemory();
             memoryUsage = (double) usedMemory / maxMemory;
             
@@ -216,37 +236,54 @@ public class ParseService {
         }
     }
 
+    // 自定义的【文件文字计算器】，专门接收Tika提取的文字，实时算Token
     private class StreamingEstimateHandler extends BodyContentHandler {
+
+        // 1. 临时缓冲区：用来积累Tika传来的文本，直到达到父块大小就切分成子块
         private final StringBuilder buffer = new StringBuilder();
+        // 2. 累计总Token数（整个文件的预估Token）
         private long estimatedTokens = 0L;
+        // 3. 累计总分片数（整个文件要切多少段给AI）
         private int estimatedChunkCount = 0;
 
+        // 构造方法：super(-1) = 不限制文字长度，大文件也能处理
         private StreamingEstimateHandler() {
             super(-1);
         }
 
+        // Tika 提取到一段文字，就自动跑这里：把文字放进临时buffer
         @Override
         public void characters(char[] ch, int start, int length) {
             buffer.append(ch, start, length);
+            // buffer装满（达到设定父块大小），立即计算token，然后清空buffer继续装(存满一批算一次：性能最大化)
             if (buffer.length() >= parentChunkSize) {
                 processParentChunk();
             }
         }
 
+        // 文件全部读完了，执行这个方法
         @Override
         public void endDocument() {
+            // 文件读完了，buffer里如果还有剩下的文字，必须处理完！
             if (buffer.length() > 0) {
                 processParentChunk();
             }
         }
 
+        //真正的【计算逻辑】
         private void processParentChunk() {
+            // 1. 把临时篮子里的文字，【按语义智能分片】（不硬切句子，保证AI能看懂）
             List<String> childChunks = ParseService.this.splitTextIntoChunksWithSemantics(buffer.toString(), chunkSize);
+            // 2. 累加：本次切了多少段 → 总片数 += 这个数字
             estimatedChunkCount += childChunks.size();
+
+            // 3. 调用工具：计算这些片段的总Token数 → 总Token += 这个数字
             estimatedTokens += usageQuotaService.estimateEmbeddingTokens(childChunks);
+
+            //清空， 继续装下一批文字
             buffer.setLength(0);
         }
-
+        // 把算好的 总Token、总分片数 打包成结果返回
         private EmbeddingEstimate snapshot() {
             return new EmbeddingEstimate(estimatedTokens, estimatedChunkCount);
         }
@@ -832,6 +869,7 @@ public class ParseService {
         return chunks;
     }
 
+    // 结果记录：预估的Token数 + 预估的分片数
     public record EmbeddingEstimate(long estimatedTokens, int estimatedChunkCount) {
     }
 }

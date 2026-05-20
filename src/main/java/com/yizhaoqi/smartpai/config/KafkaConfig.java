@@ -20,12 +20,15 @@ import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
-
+/**
+ * Kafka 配置类
+ * 用于配置 Kafka 生产者和消费者，以及主题（topic）的分区和复制因子。3个主题：file-processing, file-processing-dlt, file-processing-dlt-merged
+ */
 @Configuration
 public class KafkaConfig {
 
     @Value("${spring.kafka.bootstrap-servers}")
-    private String bootstrapServers;
+    private String bootstrapServers;  //服务地址
 
     @Value("${spring.kafka.topic.file-processing}")
     private String fileProcessingTopic;
@@ -49,6 +52,7 @@ public class KafkaConfig {
     private String trustedPackages;
 
 
+    // 返回
     public String getFileProcessingTopic() {
         return fileProcessingTopic;
     }

@@ -86,7 +86,7 @@ public class FileTypeValidationService {
      * 验证文件类型是否支持
      *
      * @param fileName 文件名
-     * @return 验证结果
+     * @return 文件类型验证结果，包含是否有效、提示信息、文件类型描述和扩展名
      */
     public FileTypeValidationResult validateFileType(String fileName) {
         logger.debug("开始验证文件类型: fileName={}", fileName);
