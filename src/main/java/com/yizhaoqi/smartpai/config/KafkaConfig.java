@@ -102,6 +102,7 @@ public class KafkaConfig {
         return factory;
     }
 
+
     @Bean
     public KafkaTemplate<String, Object> kafkaTemplate() {
         return new KafkaTemplate<>(producerFactory());

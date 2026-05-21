@@ -85,12 +85,14 @@ public class ParseService {
         // 在解析前检查内存使用情况，防止解析大文件时内存不足导致程序崩溃
         checkMemoryThreshold();
 
+        // BufferedInputStream 内部实现了 mark/reset, 可以让我们在读取文件头部进行类型嗅探后，重置流位置，而不需要重新打开文件流
         try (BufferedInputStream bufferedStream = new BufferedInputStream(fileStream, bufferSize)) {
             /**
              *  PDF 专用路径，按页解析(PDF 有天然的页面边界, 好做页切分)
              *
              *  Apache PDFBox 按页解析路径, 不用Tika了, 直接用PDFBox的API按页提取文本, 这样更快更干净
              */
+            // 嗅探文件类型 → 需要读前几个字节来判断是否是PDF，PDF文件有明显的"%PDF-"头部标识
             if (isPdfDocument(bufferedStream)) {
                 parsePdfAndSave(fileMd5, bufferedStream, userId, orgTag, isPublic);
                 logger.info("PDF 文件页级解析和入库完成，fileMd5: {}", fileMd5);

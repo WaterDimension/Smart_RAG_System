@@ -76,7 +76,7 @@ public class FileProcessingConsumer {
                 throw new IOException("流为空");
             }
 
-            // 强制转换为可缓存流
+            // 强制转换为可缓存流, 包装后，支持 mark/reset，解析器可以在需要时回退流位置，而不必重新下载文件
             if (!fileStream.markSupported()) {
                 fileStream = new BufferedInputStream(fileStream);
             }
@@ -101,7 +101,7 @@ public class FileProcessingConsumer {
         } catch (Exception e) {
             documentService.markVectorizationFailed(task.getFileMd5(), e);
             log.error("Error processing task: {}", task, e);
-            // 抛出异常让 Kafka 捕获并触发重试 / 死信
+            // 抛出异常让 Kafka  DefaultErrorHandler捕获并触发重试 / 死信
             throw new RuntimeException("Error processing task", e);
         } finally {
             // 确保关闭输入流
