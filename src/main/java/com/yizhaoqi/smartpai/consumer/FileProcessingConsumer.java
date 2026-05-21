@@ -99,6 +99,7 @@ public class FileProcessingConsumer {
             documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
             log.info("向量化完成，fileMd5: {}", task.getFileMd5());
         } catch (Exception e) {
+            // TODO 第一次向量化中断后，parseAndSave() 的 saveChildChunks()提取文本还要执行一次，只追加不清理
             documentService.markVectorizationFailed(task.getFileMd5(), e);
             log.error("Error processing task: {}", task, e);
             // 抛出异常让 Kafka  DefaultErrorHandler捕获并触发重试 / 死信

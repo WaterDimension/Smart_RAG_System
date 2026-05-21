@@ -42,7 +42,7 @@ public class KafkaConfig {
     private int topicPartitions;
 
     @Value("${spring.kafka.topic.replication-factor:1}")
-    private short topicReplicationFactor;
+    private short topicReplicationFactor;  //副本数
 
     @Value("${spring.kafka.consumer.group-id}")
     private String fileProcessingGroupId;
@@ -118,7 +118,7 @@ public class KafkaConfig {
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
         config.put(JsonDeserializer.TRUSTED_PACKAGES, trustedPackages);
-        return new DefaultKafkaConsumerFactory<>(config);
+        return new DefaultKafkaConsumerFactory<>(config); //
     }
 
     // 带自动重试和死信队列的监听器工厂

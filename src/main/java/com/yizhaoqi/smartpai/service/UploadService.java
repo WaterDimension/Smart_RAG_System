@@ -346,7 +346,7 @@ public class UploadService {
 
 
     /**
-     * 获取已上传的分片列表
+     * 获取已上传的分片列表, 查询进度
      *
      * @param fileMd5 文件的 MD5 值
      * @param userId 用户ID

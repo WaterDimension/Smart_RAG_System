@@ -47,7 +47,7 @@ public class ParseService {
     private int chunkSize;
 
     @Value("${file.parsing.overlap-size:100}")
-    private int overlapSize = 100;
+    private int overlapSize = 100; // 默认重叠100字符，保证上下文连贯，避免切分点断句导致AI理解困难
 
     @Value("${file.parsing.min-chunk-size:100}")
     private int minChunkSize = 100;
@@ -570,6 +570,11 @@ public class ParseService {
 
     /**
      * 智能文本分割，保持语义完整性
+     *
+     *   1. 段落边界 — 按 \n\n+ 分割
+     *   2. 句子边界 — 按中英文标点（。！？；.!?;）切分长段落
+     *   3. HanLP 分词边界 — 对超长句子使用 StandardTokenizer 按词切分
+     *   4. HanLP挂了->字符级回退 — 单字符切分作为兜底
      */
     private List<String> splitTextIntoChunksWithSemantics(String text, int chunkSize) {
         if (text == null || text.isBlank()) {
@@ -577,19 +582,26 @@ public class ParseService {
         }
 
         int effectiveChunkSize = Math.max(1, chunkSize);
+        // 第一步：按段落边界切分，得到初步的文本块列表
         List<String> baseChunks = splitTextIntoBaseChunks(text, effectiveChunkSize);
+        // 第二步：合并过小的文本块，避免产生大量无意义的碎片
         List<String> mergedChunks = mergeSmallChunks(baseChunks, effectiveChunkSize);
+        // 第三步：在文本块之间添加语义重叠，增强上下文连贯性
         return addSemanticOverlap(mergedChunks, effectiveChunkSize);
     }
 
+    // 按段落边界切分，得到初步的文本块列表
     private List<String> splitTextIntoBaseChunks(String text, int chunkSize) {
+        // 装分割结果
         List<String> chunks = new ArrayList<>();
 
         // 按段落分割
         String[] paragraphs = text.split("\n\n+");
 
+        //箱子，装段落的，装满了就丢到chunks里，重新开一个箱子
         StringBuilder currentChunk = new StringBuilder();
 
+        // 每个段落
         for (String paragraph : paragraphs) {
             if (paragraph == null || paragraph.isBlank()) {
                 continue;
@@ -597,28 +609,28 @@ public class ParseService {
 
             paragraph = paragraph.trim();
 
-            // 如果单个段落超过chunk大小，需要进一步分割
+            // 1.单段落超过chunk大小，需要进一步分割
             if (paragraph.length() > chunkSize) {
-                // 先保存当前chunk
+                // 里面有其他段落，先封箱
                 if (currentChunk.length() > 0) {
                     chunks.add(currentChunk.toString().trim());
                     currentChunk = new StringBuilder();
                 }
 
-                // 按句子分割长段落
+                //  调用splitLongParagraph把这个长段落按句子切开，得到一个句子列表
                 List<String> sentenceChunks = splitLongParagraph(paragraph, chunkSize);
                 chunks.addAll(sentenceChunks);
             }
-            // 如果添加这个段落会超过chunk大小
+            // 当前箱子装不下
             else if (currentChunk.length() + paragraph.length() + paragraphSeparatorLength(currentChunk) > chunkSize) {
                 // 保存当前chunk
                 if (currentChunk.length() > 0) {
                     chunks.add(currentChunk.toString().trim());
                 }
-                // 开始新chunk
+                // 新开一个chunk装这个段落;
                 currentChunk = new StringBuilder(paragraph);
             }
-            // 可以添加到当前chunk
+            // 段落追加到当前chunk;
             else {
                 if (currentChunk.length() > 0) {
                     currentChunk.append("\n\n");
@@ -639,23 +651,31 @@ public class ParseService {
         return currentChunk.length() > 0 ? 2 : 0;
     }
 
+
+    // 把小碎片合并成大块
     private List<String> mergeSmallChunks(List<String> chunks, int chunkSize) {
         List<String> merged = new ArrayList<>();
         int effectiveMinChunkSize = normalizedMinChunkSize(chunkSize);
         int maxMergedChunkSize = chunkSize + normalizedOverlapSize(chunkSize);
 
         for (String chunk : chunks) {
+            // 1. 把当前块标准化（去掉多余空白等）
             String normalizedChunk = normalizeChunk(chunk);
             if (normalizedChunk.isEmpty()) {
                 continue;
             }
 
             if (!merged.isEmpty()) {
+                // 2. 取出前一个块
                 String previous = merged.get(merged.size() - 1);
+                // 3. 试着把前一个块和当前块拼起来
                 String combined = combineChunks(previous, normalizedChunk);
+                // 4. 判断要不要合并
                 if ((normalizedChunk.length() < effectiveMinChunkSize || previous.length() < effectiveMinChunkSize)
                         && combined.length() <= maxMergedChunkSize) {
+                    // 5. 合并：替换掉前一个块
                     merged.set(merged.size() - 1, combined);
+                    // 6. 不符合合并条件，当前块独立加入
                     continue;
                 }
             }
@@ -694,16 +714,33 @@ public class ParseService {
         return normalizeChunk(first) + "\n\n" + normalizeChunk(second);
     }
 
+    /**
+     *
+     * @param chunks
+     * @param chunkSize
+     * @return
+     */
+    // 在相邻块之间添加语义重叠，增强上下文连贯性
     private List<String> addSemanticOverlap(List<String> chunks, int chunkSize) {
+        // 1. 相邻两块之间重叠文本长度
         int effectiveOverlapSize = normalizedOverlapSize(chunkSize);
+        // 2. 如果重叠长度不合理，或者块数量太少，就不添加重叠了，直接返回原块列表
         if (effectiveOverlapSize <= 0 || chunks.size() <= 1) {
             return chunks;
         }
 
+        // 提取重叠文本的逻辑: 让每个 chunk 都"看到"前一个 chunk 的结尾部分
+        /**
+         *   1. 从上一个chunk的末尾倒着取句子
+         *   2. 累加这些句子，总长度不超过 overlapSize(100)
+         *   3. 遇到单个句子超过100字的，用 HanLP 按词边界截取尾部
+         *   4. HanLP 失败就用字符截取
+         */
         List<String> overlappedChunks = new ArrayList<>(chunks.size());
         overlappedChunks.add(chunks.get(0));
 
         for (int i = 1; i < chunks.size(); i++) {
+            // 从前一个块的末尾提取重叠文本，长度不超过100字的文本
             String overlapText = buildOverlapText(chunks.get(i - 1), effectiveOverlapSize);
             String currentChunk = chunks.get(i);
             if (overlapText.isEmpty()) {
@@ -716,6 +753,7 @@ public class ParseService {
         return overlappedChunks;
     }
 
+    // 从前一个块的末尾提取重叠文本，长度不超过 overlapSize 的文本，保持语义完整
     private String buildOverlapText(String text, int maxLength) {
         if (text == null || text.isBlank() || maxLength <= 0) {
             return "";
@@ -729,21 +767,22 @@ public class ParseService {
             if (sentence.isEmpty()) {
                 continue;
             }
-
+        // 情况A：单个句子超过maxLength
             if (sentence.length() > maxLength) {
                 return overlap.isEmpty()
-                        ? tailByTokenBoundary(sentence, maxLength)
-                        : overlap.toString().trim();
+                        ? tailByTokenBoundary(sentence, maxLength)   // 还没收集到任何东西，用HanLP从尾部截(按词语边界切分)
+                        : overlap.toString().trim();                // 已经有内容了，直接返回
             }
-
+        // 情况B：句子本身正常，但加上它会超过 maxLength
             if (overlap.length() + sentence.length() > maxLength) {
                 break;
             }
-
+            // 情况C：加上这句还不超，插到前面
             overlap.insert(0, sentence);
         }
 
         if (overlap.isEmpty()) {
+            // 如果一条句子都没收集到（空文本或全是空白），返回空字符串
             return tailByTokenBoundary(text, maxLength);
         }
         return overlap.toString().trim();
