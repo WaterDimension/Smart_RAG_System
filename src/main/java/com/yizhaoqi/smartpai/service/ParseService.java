@@ -44,7 +44,7 @@ public class ParseService {
     private UsageQuotaService usageQuotaService;
 
     @Value("${file.parsing.chunk-size}")
-    private int chunkSize;
+    private int chunkSize;   // 512字符的子切片大小，适合大模型的输入限制，同时保持足够的上下文信息
 
     @Value("${file.parsing.overlap-size:100}")
     private int overlapSize = 100; // 默认重叠100字符，保证上下文连贯，避免切分点断句导致AI理解困难
@@ -98,7 +98,6 @@ public class ParseService {
                 logger.info("PDF 文件页级解析和入库完成，fileMd5: {}", fileMd5);
                 return;
             }
-
             /**
              *  普通文件：Tika + 自定义 StreamingContentHandler 流式处理
              *
@@ -107,9 +106,9 @@ public class ParseService {
              *  这样整个文件不需要一次性全部加载到内存，流式处理，避免 OOM
              */
             StreamingContentHandler handler = new StreamingContentHandler(fileMd5, userId, orgTag, isPublic);
-            Metadata metadata = new Metadata();
-            ParseContext context = new ParseContext();
-            AutoDetectParser parser = new AutoDetectParser();
+            Metadata metadata = new Metadata();  // Tika解析需要的元数据对象，虽然我们不需要特别的元数据，但这个对象必须传入解析器
+            ParseContext context = new ParseContext();  // Tika解析需要的上下文对象，虽然我们不需要特别的上下文配置，但这个对象必须传入解析器
+            AutoDetectParser parser = new AutoDetectParser(); // Tika的万能解析器，能自动识别文件类型并提取文本内容
 
             // Tika的parse方法会驱动整个流式处理过程
             // 当handler的characters方法接收到足够数据时，会触发分块、切片和保存
@@ -146,7 +145,7 @@ public class ParseService {
             if (isPdfDocument(bufferedStream)) {
                 return estimatePdfEmbeddingUsage(bufferedStream);
             }
-            // 4.非PDF自定义计算器:StreamingEstimateHandler，边读文本边算Token
+            // 4.自定义计算器:StreamingEstimateHandler，边读文本边算Token
             StreamingEstimateHandler handler = new StreamingEstimateHandler();
             // Tika解析需要的固定参数
             Metadata metadata = new Metadata();
@@ -206,8 +205,9 @@ public class ParseService {
         private final String userId;
         private final String orgTag;
         private final boolean isPublic;
-        private int savedChunkCount = 0;
+        private int savedChunkCount = 0;  // 这个计数器用来给子切片分配连续的chunkId，确保同一文件的切片ID是连续的，方便后续查询和调试
 
+        // 父块层：1MB 缓冲区（仅内存，不持久化）   
         public StreamingContentHandler(String fileMd5, String userId, String orgTag, boolean isPublic) {
             super(-1); // 禁用Tika的内部写入限制，我们自己管理缓冲区
             this.fileMd5 = fileMd5;
@@ -219,6 +219,7 @@ public class ParseService {
         @Override
         public void characters(char[] ch, int start, int length) {
             buffer.append(ch, start, length);
+            // 每攒够 1MB 触发一次， 把缓冲区里的文字处理成子切片入库（父->子切片）
             if (buffer.length() >= parentChunkSize) {
                 processParentChunk();
             }
@@ -232,6 +233,7 @@ public class ParseService {
             }
         }
 
+        // 子块层：512字符检索单元（持久化到DB和ES）
         private void processParentChunk() {
             String parentChunkText = buffer.toString();
             logger.debug("处理父文本块，大小: {} bytes", parentChunkText.length());
@@ -239,7 +241,7 @@ public class ParseService {
             // 1. 将父块分割成更小的、有语义的子切片
             List<String> childChunks = ParseService.this.splitTextIntoChunksWithSemantics(parentChunkText, chunkSize);
 
-            // 2. 将子切片批量保存到数据库
+            // 2. 将子切片批量保存到数据库, 返回最新的总分片数，继续给下一个父块分配chunkId
             this.savedChunkCount = ParseService.this.saveChildChunks(
                     fileMd5, childChunks, userId, orgTag, isPublic, this.savedChunkCount, null
             );
@@ -285,7 +287,7 @@ public class ParseService {
 
         //真正的【计算逻辑】
         private void processParentChunk() {
-            // 1. 把临时篮子里的文字，【按语义智能分片】（不硬切句子，保证AI能看懂）
+            // 1. 把临时篮子里的文字，按：段落 + 语义智能分片（不硬切句子，保证AI能看懂）
             List<String> childChunks = ParseService.this.splitTextIntoChunksWithSemantics(buffer.toString(), chunkSize);
             // 2. 累加：本次切了多少段 → 总片数 += 这个数字
             estimatedChunkCount += childChunks.size();
@@ -317,7 +319,7 @@ public class ParseService {
             String userId, String orgTag, boolean isPublic, int startingChunkId, Integer pageNumber) {
         int currentChunkId = startingChunkId;
         for (String chunk : chunks) {
-            currentChunkId++;
+            currentChunkId++;   // 每保存一个子切片，chunkId自增1，确保同一文件的切片ID是连续的，方便后续查询和调试
             var vector = new DocumentVector();
             vector.setFileMd5(fileMd5);
             vector.setChunkId(currentChunkId);
@@ -330,7 +332,7 @@ public class ParseService {
             documentVectorRepository.save(vector);
         }
         logger.info("成功保存 {} 个子切片到数据库", chunks.size());
-        return currentChunkId;
+        return currentChunkId;  // 返回最新的总分片数，供下一批父块继续分配chunkId
     }
 
     /**
@@ -386,6 +388,15 @@ public class ParseService {
         }
     }
 
+    /**
+     * 提取PDF每页的文本，并清理掉重复出现的页眉页脚等无意义内容，返回清洗后的每页文本列表。
+      1. 使用 PDFTextStripper 按页提取原始文本
+      2. 收集每页顶部和底部的前几行文本，统计它们在整个文档中出现的频率
+      3. 根据频率判断哪些行是页眉页脚（出现超过阈值的行），并在每页文本中去除这些行
+     * @param document
+     * @return
+     * @throws IOException
+     */
     private List<String> extractCleanPdfPageTexts(PDDocument document) throws IOException {
         PDFTextStripper stripper = new PDFTextStripper();
         List<List<String>> rawPageLines = new ArrayList<>();
@@ -554,7 +565,12 @@ public class ParseService {
         stream.reset();
         return header.length == 5 && "%PDF-".equals(new String(header, StandardCharsets.US_ASCII));
     }
-
+/**
+ *  构建锚文本：从文本块中提取一个简短的摘要，作为这个块的代表，方便后续展示和调试。
+ *  1. 取文本块的前120个字符，去掉多余的空白，作为锚文本
+ *  2. 如果文本块过短（少于10字符），就不生成锚文本，返回null
+ *  3. 如果文本块过长，截断后加省略号，保持锚文本简洁
+ */
     private String buildAnchorText(String chunk) {
         if (chunk == null || chunk.isBlank()) {
             return null;
@@ -581,7 +597,7 @@ public class ParseService {
             return new ArrayList<>();
         }
 
-        int effectiveChunkSize = Math.max(1, chunkSize);
+        int effectiveChunkSize = Math.max(1, chunkSize);   //一般都是512，1只是为防止除0错误
         // 第一步：按段落边界切分，得到初步的文本块列表
         List<String> baseChunks = splitTextIntoBaseChunks(text, effectiveChunkSize);
         // 第二步：合并过小的文本块，避免产生大量无意义的碎片
@@ -655,22 +671,27 @@ public class ParseService {
     // 把小碎片合并成大块
     private List<String> mergeSmallChunks(List<String> chunks, int chunkSize) {
         List<String> merged = new ArrayList<>();
+        // 合并后最小块大小 = minChunkSize（默认100）和chunkSize 512的较小值，保证合并条件合理，避免过度合并导致块过大 (定义碎片大小的上限)
         int effectiveMinChunkSize = normalizedMinChunkSize(chunkSize);
-        int maxMergedChunkSize = chunkSize + normalizedOverlapSize(chunkSize);
+        // 合并后最大块大小 = chunkSize + overlapSize做缓冲（允许合并后稍微超过chunkSize，但不能太离谱，保持在chunkSize + 100字符以内）
+        int maxMergedChunkSize = chunkSize + normalizedOverlapSize(chunkSize);  // 合并上限
 
         for (String chunk : chunks) {
-            // 1. 把当前块标准化（去掉多余空白等）
+            // 1. 把当前块chunk标准化->normalizedChunk（去掉多余空白）
             String normalizedChunk = normalizeChunk(chunk);
+            // 无信息的块
             if (normalizedChunk.isEmpty()) {
                 continue;
             }
 
+            // 第一个后的块
             if (!merged.isEmpty()) {
                 // 2. 取出前一个块
                 String previous = merged.get(merged.size() - 1);
                 // 3. 试着把前一个块和当前块拼起来
                 String combined = combineChunks(previous, normalizedChunk);
-                // 4. 判断要不要合并
+
+                // 4. 判断要不要合并(条件：前一个块或当前块有一个是小碎片，并且合并后不超过最大合并块大小)
                 if ((normalizedChunk.length() < effectiveMinChunkSize || previous.length() < effectiveMinChunkSize)
                         && combined.length() <= maxMergedChunkSize) {
                     // 5. 合并：替换掉前一个块
@@ -697,6 +718,13 @@ public class ParseService {
         return Math.min(minChunkSize, chunkSize);
     }
 
+    /**
+     * 根据 chunkSize 规范化 overlapSize，确保重叠长度合理，既能增强上下文连贯性，又不会导致块过大。
+      1. 如果 overlapSize <= 0 或 chunkSize <= 1，说明不需要重叠，直接返回0
+      2. 否则，重叠长度不能超过 chunkSize - 1（至少要留一个字符给当前块），也不能超过默认的 overlapSize（100），取两者的较小值
+     * @param chunkSize
+     * @return
+     */
     private int normalizedOverlapSize(int chunkSize) {
         if (overlapSize <= 0 || chunkSize <= 1) {
             return 0;
@@ -715,22 +743,27 @@ public class ParseService {
     }
 
     /**
-     *
-     * @param chunks
-     * @param chunkSize
-     * @return
+     * 在相邻块之间添加语义重叠，增强上下文连贯性
+      1. 计算合理的重叠长度（不能超过 chunkSize - 1，也不能超过默认的 overlapSize 100）
+      2. 如果重叠长度不合理，或者块数量太少，就不添加重叠了，直接返回原块列表
+      3. 否则，遍历块列表，从第二块开始，在每块前面添加一个重叠文本，这个重叠文本是从前一个块的末尾提取的，长度不超过 overlapSize 的文本，保持语义完整
+          - 提取重叠文本的逻辑: 让每个 chunk 都"看到"前一个 chunk 的结尾部分
+              1. 从上一个chunk的末尾倒着取句子
+              2. 累加这些句子，总长度不超过 overlapSize(100)
+              3. 遇到单个句子超过100字的，用 HanLP 按词边界截取尾部
+              4. HanLP 失败就用字符截取
      */
     // 在相邻块之间添加语义重叠，增强上下文连贯性
     private List<String> addSemanticOverlap(List<String> chunks, int chunkSize) {
-        // 1. 相邻两块之间重叠文本长度
+        // 1. 相邻块之间共享的文本长度 ，不能超过 chunkSize - 1 (<512)，确保重叠合理 < overlapsize 100，既能增强上下文连贯性，又不会导致块过大
         int effectiveOverlapSize = normalizedOverlapSize(chunkSize);
         // 2. 如果重叠长度不合理，或者块数量太少，就不添加重叠了，直接返回原块列表
         if (effectiveOverlapSize <= 0 || chunks.size() <= 1) {
             return chunks;
         }
 
-        // 提取重叠文本的逻辑: 让每个 chunk 都"看到"前一个 chunk 的结尾部分
         /**
+         * 提取重叠文本的逻辑: 让每个 chunk 都"看到"前一个 chunk 的结尾部分
          *   1. 从上一个chunk的末尾倒着取句子
          *   2. 累加这些句子，总长度不超过 overlapSize(100)
          *   3. 遇到单个句子超过100字的，用 HanLP 按词边界截取尾部
@@ -740,12 +773,14 @@ public class ParseService {
         overlappedChunks.add(chunks.get(0));
 
         for (int i = 1; i < chunks.size(); i++) {
-            // 从前一个块的末尾提取重叠文本，长度不超过100字的文本
+            // 从前一个块的末尾提取”语义“连贯的文本，长度不超过100字的文本
             String overlapText = buildOverlapText(chunks.get(i - 1), effectiveOverlapSize);
             String currentChunk = chunks.get(i);
+            // 前一个块的末尾没有足够的文本做重叠
             if (overlapText.isEmpty()) {
                 overlappedChunks.add(currentChunk);
             } else {
+                // 合并前个块
                 overlappedChunks.add(overlapText + "\n\n" + currentChunk);
             }
         }
@@ -753,21 +788,24 @@ public class ParseService {
         return overlappedChunks;
     }
 
-    // 从前一个块的末尾提取重叠文本，长度不超过 overlapSize 的文本，保持语义完整
+
+    // 从文本末尾开始，按句子为单位向前收集，直到达到最大长度限制 ，确保重叠文本在语义边界处切分。
     private String buildOverlapText(String text, int maxLength) {
         if (text == null || text.isBlank() || maxLength <= 0) {
             return "";
         }
 
+        // 1. 先把文本切成句子单元
         List<String> sentences = splitIntoSentenceUnits(text);
         StringBuilder overlap = new StringBuilder();
 
+        // 2. 从后往前遍历 句子（从末尾开始收集）
         for (int i = sentences.size() - 1; i >= 0; i--) {
             String sentence = sentences.get(i).trim();
             if (sentence.isEmpty()) {
                 continue;
             }
-        // 情况A：单个句子超过maxLength
+        // 情况A：单个句子超过maxLength 100
             if (sentence.length() > maxLength) {
                 return overlap.isEmpty()
                         ? tailByTokenBoundary(sentence, maxLength)   // 还没收集到任何东西，用HanLP从尾部截(按词语边界切分)
@@ -782,7 +820,8 @@ public class ParseService {
         }
 
         if (overlap.isEmpty()) {
-            // 如果一条句子都没收集到（空文本或全是空白），返回空字符串
+            // 所有句子都超长 （超过 maxLength）且还没收集到任何内容
+            // 或者文本本身就没有可用的句子分割
             return tailByTokenBoundary(text, maxLength);
         }
         return overlap.toString().trim();
@@ -804,6 +843,15 @@ public class ParseService {
         return sentences;
     }
 
+    /**
+     * 使用HanLP的StandardTokenizer从文本末尾按词边界截取，确保重叠文本在语义边界处切分，避免切到半个词导致AI理解困难。
+      1. 如果文本本身就不超过maxLength，直接返回
+      2. 否则，使用HanLP分词，从文本末尾开始累加词语，直到达到maxLength限制
+      3. 如果HanLP分词失败了（可能是因为文本太长或有特殊字符），作为兜底方案，直接按字符从尾部截取maxLength长度的文本返回
+     * @param text
+     * @param maxLength
+     * @return
+     */
     private String tailByTokenBoundary(String text, int maxLength) {
         if (text == null || text.isBlank() || maxLength <= 0) {
             return "";
@@ -835,6 +883,7 @@ public class ParseService {
             logger.debug("HanLP overlap 边界处理失败，使用字符兜底: {}", e.getMessage());
         }
 
+        // 兜底：直接按字符从尾部截取maxLength长度的文本返回
         return normalized.substring(Math.max(0, normalized.length() - maxLength));
     }
 
