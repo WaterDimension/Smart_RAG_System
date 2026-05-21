@@ -64,13 +64,13 @@ public class KafkaConfig {
     }
 
     // 主题自动创建
-    // 如果主题不存在，Spring 启动时自动在 Kafka Broker 上创建它。
+    // 如果主题不存在，Spring 启动时自动在 Broker 上创建它。
     // 分区数和复制因子根据配置文件中的设置进行配置。
     @Bean
     public NewTopic fileProcessingNewTopic() {
         return TopicBuilder.name(fileProcessingTopic)       // 从配置读取主题：file-processing
                 .partitions(topicPartitions) // 分区数
-                .replicas(topicReplicationFactor) // 复制因子
+                .replicas(topicReplicationFactor) // 复制因子（副本数）
                 .build();
     }
 
@@ -82,22 +82,23 @@ public class KafkaConfig {
                 .build();
     }
 
+    //生产者配置
     @Bean
     public ProducerFactory<String, Object> producerFactory() {
         Map<String, Object> config = new HashMap<>();
-//        config.put(ProducerConfig.ACKS_CONFIG, "all");
-        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
+
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);   //Broker地址
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class); // 消息键序列化器
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class); // 消息值序列化器，使用 JSON 序列化
 
         // 可靠投递配置（消息至少投递一次（At-least-once） ，且不会因为重试导致重复消息。）
-        config.put(ProducerConfig.ACKS_CONFIG, "all"); // 所有副本都确认才返回成功
-        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // 幂等生产，防重复
-        config.put(ProducerConfig.RETRIES_CONFIG, 3); // 发送失败，自动重试 3 次
+        config.put(ProducerConfig.ACKS_CONFIG, "all"); // 1. 所有副本都确认才返回成功
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true); // 2. 幂等生产，防重复 (Broker会为每个Producer分配一个Producer ID，并为每条消息分配一个递增的序列号）
+        config.put(ProducerConfig.RETRIES_CONFIG, 3); //3.  发送失败，自动重试 3 次。结合上面的幂等配置，重试不会产生重复消息。
 
         DefaultKafkaProducerFactory<String, Object> factory = new DefaultKafkaProducerFactory<>(config);
         // 设置事务前缀，启用事务能力
-        factory.setTransactionIdPrefix("file-upload-tx-");
+        factory.setTransactionIdPrefix("file-upload-tx-");   //4. 可以跨多个 Topic/Partition原子性地写入
         return factory;
     }
 

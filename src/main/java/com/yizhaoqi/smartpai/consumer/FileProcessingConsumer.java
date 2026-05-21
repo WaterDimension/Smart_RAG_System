@@ -17,12 +17,19 @@ import java.net.URL;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 
+/**
+ * 文件处理消费者类
+ * 监听 Kafka 中的文件处理任务消息，执行文件下载、解析、向量化等处理流程，并更新文档状态
+ */
 @Service
 @Slf4j
 public class FileProcessingConsumer {
 
+    // 解析服务，用于提取文件中的文本内容并进行分块处理
     private final ParseService parseService;
+    // 向量化服务，用于生成文本的向量表示（Embedding）并存储到 Elasticsearch 中
     private final VectorizationService vectorizationService;
+    // 文档服务，用于更新文档的处理状态和重建索引等操作
     private final DocumentService documentService;
     @Autowired
     private KafkaConfig kafkaConfig;
@@ -38,18 +45,23 @@ public class FileProcessingConsumer {
         this.documentService = documentService;
     }
 
-    // @KafkaListener 监听
+    /**
+     * Producer 把 FileProcessingTask 对象 → JSON 字符串 → 字节，Consumer 把字节 → JSON 字符串 → FileProcessingTask 对象
+     *
+     *  @KafkaListener 监听, 订阅主题，并指定消费者组 ID  (subscribe + poll 轮询，只需要写处理方法)
+     */
     @KafkaListener(topics = "#{kafkaConfig.getFileProcessingTopic()}",   // SpEL 表达式#{}动态解析主题名
-    groupId = "#{kafkaConfig.getFileProcessingGroupId()}")              // 消费者组 ID
-    public void processTask(FileProcessingTask task) {
+    groupId = "#{kafkaConfig.getFileProcessingGroupId()}")
+    public void processTask(FileProcessingTask task) {       //反序列化,方法参数直接拿到对象
         log.info("Received task: {}", task);
         log.info("文件权限信息: userId={}, orgTag={}, isPublic={}", 
                 task.getUserId(), task.getOrgTag(), task.isPublic());
 
-        // 标记为处理中，避免重复处理
+        // 1.标记为处理中，避免重复处理
         documentService.markVectorizationProcessing(task.getFileMd5(), false);
 
-        // 判断任务类型
+        // 判断任务类型: 如果是重建索引任务，直接调用重建索引方法，不需要下载和解析文件
+        // NOTE
         if (FileProcessingTask.TASK_TYPE_REINDEX.equals(task.getTaskType())) {
             processReindexTask(task);
             return;  // 重建索引走不同路径
@@ -57,7 +69,7 @@ public class FileProcessingConsumer {
 
         InputStream fileStream = null;
         try {
-            // 通过HTTP下载 MinIO 中的合并文件
+        // 2.下载 MinIO 中的合并文件(本地/远程http/https)，获取输入流
             fileStream = downloadFileFromStorage(task.getFilePath());
             // 在 downloadFileFromStorage 返回后立即检查流是否可读
             if (fileStream == null) {
@@ -69,12 +81,12 @@ public class FileProcessingConsumer {
                 fileStream = new BufferedInputStream(fileStream);
             }
 
-            // 解析文件（提取文本 + 分块）
-            parseService.parseAndSave(task.getFileMd5(), fileStream, 
+        // 3.解析文件（提取文本 + 分块） 把解析后的chunkText存入数据库，关联fileMd5，供后续向量化使用
+            parseService.parseAndSave(task.getFileMd5(), fileStream,   //流式文档解析入库，不需要一次性加载到内存
                     task.getUserId(), task.getOrgTag(), task.isPublic());
             log.info("文件解析完成，fileMd5: {}", task.getFileMd5());
 
-            // 向量化处理（生成 Embedding + 存入 ES）
+        // 4.向量化处理（Embedding + 存入 ES）
             VectorizationService.VectorizationUsageResult vectorizationResult = vectorizationService.vectorizeWithUsage(
                     task.getFileMd5(),
                     task.getUserId(),
@@ -83,13 +95,13 @@ public class FileProcessingConsumer {
                     task.getUserId()
             );
 
-            // 标记完成
+            // 标记完成, 把用量信息（使用的tokens数量、chunk数量、模型版本等）存入数据库,方便后面统计成本
             documentService.markVectorizationCompleted(task.getFileMd5(), vectorizationResult);
             log.info("向量化完成，fileMd5: {}", task.getFileMd5());
         } catch (Exception e) {
             documentService.markVectorizationFailed(task.getFileMd5(), e);
             log.error("Error processing task: {}", task, e);
-            // 抛出异常让 Kafka 的 DefaultErrorHandler 捕获并触发重试 / 死信
+            // 抛出异常让 Kafka 捕获并触发重试 / 死信
             throw new RuntimeException("Error processing task", e);
         } finally {
             // 确保关闭输入流
@@ -117,12 +129,14 @@ public class FileProcessingConsumer {
     }
 
     /**
-     * 模拟从存储系统下载文件
+     * 从存储系统下载文件
      *
      * @param filePath 文件路径或 URL
      * @return 文件输入流
      */
-    private InputStream downloadFileFromStorage(String filePath) throws ServerException, InsufficientDataException, ErrorResponseException, IOException, NoSuchAlgorithmException, InvalidKeyException, InvalidResponseException, XmlParserException, InternalException {
+    private InputStream downloadFileFromStorage(String filePath) throws
+            ServerException, InsufficientDataException, ErrorResponseException, IOException,
+            NoSuchAlgorithmException, InvalidKeyException, InvalidResponseException, XmlParserException, InternalException {
         log.info("Downloading file from storage: {}", filePath);
 
         try {

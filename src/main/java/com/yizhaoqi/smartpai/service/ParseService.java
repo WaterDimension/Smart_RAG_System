@@ -86,13 +86,24 @@ public class ParseService {
         checkMemoryThreshold();
 
         try (BufferedInputStream bufferedStream = new BufferedInputStream(fileStream, bufferSize)) {
+            /**
+             *  PDF 专用路径，按页解析(PDF 有天然的页面边界, 好做页切分)
+             *
+             *  Apache PDFBox 按页解析路径, 不用Tika了, 直接用PDFBox的API按页提取文本, 这样更快更干净
+             */
             if (isPdfDocument(bufferedStream)) {
                 parsePdfAndSave(fileMd5, bufferedStream, userId, orgTag, isPublic);
                 logger.info("PDF 文件页级解析和入库完成，fileMd5: {}", fileMd5);
                 return;
             }
 
-            // 创建一个流式处理器，它会在内部处理父块的切分和子块的保存
+            /**
+             *  普通文件：Tika + 自定义 StreamingContentHandler 流式处理
+             *
+             *  创建一个流式处理器，实现 SAX 的 ContentHandler 接口，在 characters() 里累积文本
+             *  当累积的文本达到 parentChunkSize 阈值， handler 内部自动触发：切父块 → 分子切片 → 写入数据库
+             *  这样整个文件不需要一次性全部加载到内存，流式处理，避免 OOM
+             */
             StreamingContentHandler handler = new StreamingContentHandler(fileMd5, userId, orgTag, isPublic);
             Metadata metadata = new Metadata();
             ParseContext context = new ParseContext();
@@ -320,18 +331,34 @@ public class ParseService {
         return currentChunkId;
     }
 
+    /**
+     * 专门处理PDF文件的解析和保存逻辑，按页提取文本，清理页眉页脚，智能分块，并保存到数据库。
+     * @param fileMd5
+     * @param fileStream
+     * @param userId
+     * @param orgTag
+     * @param isPublic
+     * @throws IOException
+     */
     private void parsePdfAndSave(String fileMd5, InputStream fileStream, String userId, String orgTag, boolean isPublic) throws IOException {
+        // 把 PDF 加载到内存
         try (PDDocument document = PDDocument.load(fileStream)) {
             int savedChunkCount = 0;
 
+            //  extractCleanPdfPageTexts提取每页的纯文本（会做清洗）
             List<String> cleanedPageTexts = extractCleanPdfPageTexts(document);
+
+            // 遍历每一页的文本，进行智能分块和入库
             for (int pageNumber = 1; pageNumber <= cleanedPageTexts.size(); pageNumber++) {
                 String pageText = cleanedPageTexts.get(pageNumber - 1);
                 if (pageText == null || pageText.isBlank()) {
                     continue;
                 }
 
+                //  对每一页的文本，调用 splitTextIntoChunksWithSemantics() 做语义分块，得到子切片列表
                 List<String> childChunks = splitTextIntoChunksWithSemantics(pageText, chunkSize);
+
+                //  把子切片childChunks写入数据库，pageNumber 作为元数据一起存储，方便后续查询
                 savedChunkCount = saveChildChunks(fileMd5, childChunks, userId, orgTag, isPublic, savedChunkCount, pageNumber);
             }
         }

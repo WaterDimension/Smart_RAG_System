@@ -275,12 +275,14 @@ public class DocumentService {
     public void markVectorizationFailed(String fileMd5, Throwable error) {
         FileUpload fileUpload = fileUploadRepository.findFirstByFileMd5OrderByCreatedAtDesc(fileMd5)
                 .orElseThrow(() -> new RuntimeException("文件不存在"));
+        // 解析异常链获取最深层的错误信息，优先返回包含“余额不足”的错误提示
         markVectorizationFailed(fileUpload, error);
     }
 
     private void markVectorizationProcessing(FileUpload fileUpload, boolean resetActualUsage) {
         fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);   // 标记为处理中
-        fileUpload.setVectorizationErrorMessage(null);
+        fileUpload.setVectorizationErrorMessage(null); // 清除错误信息
+        // 如果是重试，则清除之前的实际使用统计，重新统计；如果是初始标记为处理中，则保留之前的统计结果
         if (resetActualUsage) {
             fileUpload.setActualEmbeddingTokens(null);
             fileUpload.setActualChunkCount(null);

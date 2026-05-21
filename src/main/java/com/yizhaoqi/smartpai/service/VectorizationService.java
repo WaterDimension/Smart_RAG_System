@@ -44,19 +44,29 @@ public class VectorizationService {
         vectorizeWithUsage(fileMd5, userId, orgTag, isPublic, requesterId);
     }
 
+    /**
+     * 执行向量化操作，并返回使用情况统计
+     *
+     * @param fileMd5
+     * @param userId
+     * @param orgTag
+     * @param isPublic
+     * @param requesterId
+     * @return
+     */
     public VectorizationUsageResult vectorizeWithUsage(String fileMd5, String userId, String orgTag, boolean isPublic, String requesterId) {
         try {
             logger.info("开始向量化文件，fileMd5: {}, userId: {}, orgTag: {}, isPublic: {}", 
                        fileMd5, userId, orgTag, isPublic);
                        
-            // 获取文件分块内容
+            // 1.获取文件解析后的Textchunk内容
             List<TextChunk> chunks = fetchTextChunks(fileMd5);
             if (chunks == null || chunks.isEmpty()) {
                 logger.warn("未找到分块内容，fileMd5: {}", fileMd5);
                 return new VectorizationUsageResult(0, 0, embeddingClient.currentModelVersion());
             }
 
-            // 提取文本内容
+            // 2.提取文本内容
             List<String> texts = chunks.stream()
                     .map(TextChunk::getContent)
                     .toList();
@@ -67,22 +77,22 @@ public class VectorizationService {
                     requesterId,
                     EmbeddingClient.UsageType.UPLOAD
             );
+
+            // 对应的向量列表
             List<float[]> vectors = embeddingResult.vectors();
 
             // 构建 Elasticsearch 文档并存储
             List<EsDocument> esDocuments = IntStream.range(0, chunks.size())
                     .mapToObj(i -> new EsDocument(
-                            UUID.randomUUID().toString(),
-                            fileMd5,
-                            chunks.get(i).getChunkId(),
-                            chunks.get(i).getContent(),
+                            UUID.randomUUID().toString(),   // 主键
+                            fileMd5,                        // 外键，关联回源文件
+                            chunks.get(i).getChunkId(),     // 分块序号
+                            chunks.get(i).getContent(),     // 原文（检索到后要展示给用户的）
                             chunks.get(i).getPageNumber(),
                             chunks.get(i).getAnchorText(),
-                            vectors.get(i),
+                            vectors.get(i),                 // 向量，用来做相似度计算的
                             embeddingResult.modelVersion(),
-                            userId,
-                            orgTag,
-                            isPublic
+                            userId, orgTag, isPublic        // 权限，搜的时候过滤用的
                     ))
                     .toList();
 
@@ -90,9 +100,9 @@ public class VectorizationService {
 
             logger.info("向量化完成，fileMd5: {}", fileMd5);
             return new VectorizationUsageResult(
-                    embeddingResult.totalTokens(),
-                    chunks.size(),
-                    embeddingResult.modelVersion()
+                    embeddingResult.totalTokens(), //  消耗的 token 数（计费用）
+                    chunks.size(),                 // 多少分块
+                    embeddingResult.modelVersion() // 用的模型版本
             );
         } catch (Exception e) {
             logger.error("向量化失败，fileMd5: {}", fileMd5, e);
@@ -126,6 +136,7 @@ public class VectorizationService {
                 .toList();
     }
 
+    //实际使用的 embedding tokens 数量、实际分块数量、模型版本
     public record VectorizationUsageResult(int actualEmbeddingTokens, int actualChunkCount, String modelVersion) {
     }
 }

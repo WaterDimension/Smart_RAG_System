@@ -442,11 +442,11 @@ public class UploadController {
                     fileUpload.getUserId(),
                     fileUpload.getOrgTag(),
                     fileUpload.isPublic(),
-                    FileProcessingTask.TASK_TYPE_UPLOAD_PROCESS,
+                    FileProcessingTask.TASK_TYPE_UPLOAD_PROCESS,  // 任务类型：上传处理
                     userId
             );
 
-            // 2.更新状态为 "处理中"，并清除之前的向量化结果（如果有的话），防止旧数据干扰新的处理流程
+            // 2.更新状态为 "处理中"，并清除之前没完成的向量化结果（如果有的话），防止旧数据干扰新的处理流程
             fileUpload.setVectorizationStatus(FileUpload.VECTORIZATION_STATUS_PROCESSING);     //向量化中
             fileUpload.setVectorizationErrorMessage(null);
             fileUpload.setActualEmbeddingTokens(null);
@@ -462,6 +462,8 @@ public class UploadController {
                 kt.send(kafkaConfig.getFileProcessingTopic(), task);
                 return true;
             });
+            // TODO 如果第 1.2 步保存了状态但第 1.3 步发送失败，事务不会提交，消费者不会收到消息，状态仍为 PROCESSING ——这有问题，但比"发了消息但状态没更新"安全。
+
             LogUtils.logBusiness("MERGE_FILE", userId, "文件处理任务已发送: fileMd5=%s, fileName=%s, fileType=%s", request.fileMd5(), request.fileName(), fileType);
 
             // 构建数据对象
