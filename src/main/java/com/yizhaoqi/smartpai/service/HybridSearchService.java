@@ -52,7 +52,7 @@ public class HybridSearchService {
     private FileUploadRepository fileUploadRepository;
 
     /**
-     * 使用文本匹配和向量相似度进行混合搜索，支持权限过滤
+     * 使用文本匹配和向量相似度进行 混合搜索，支持权限过滤
      * 该方法确保用户只能搜索其有权限访问的文档（自己的文档、公开文档、所属组织的文档）
      *
      * @param query  查询字符串
@@ -64,15 +64,16 @@ public class HybridSearchService {
         logger.debug("开始带权限搜索，查询: {}, 用户ID: {}", query, userId);
         
         try {
-            // 获取用户有效的组织标签（包含层级关系）
+            // 1.获取用户权限信息
+            // 1.1获取用户有效的组织标签（包含层级关系）
             List<String> userEffectiveTags = getUserEffectiveOrgTags(userId);
             logger.debug("用户 {} 的有效组织标签: {}", userId, userEffectiveTags);
 
-            // 获取用户的数据库ID用于权限过滤
+            // 1.2获取用户的数据库ID用于权限过滤
             String userDbId = getUserDbId(userId);
             logger.debug("用户 {} 的数据库ID: {}", userId, userDbId);
 
-            // 生成查询向量
+            // 2.生成查询向量
             final List<Float> queryVector = embedToVectorList(query, userId);
 
             // 如果向量生成失败，仅使用文本匹配
@@ -83,6 +84,7 @@ public class HybridSearchService {
 
             logger.debug("向量生成成功，开始执行混合搜索 KNN");
 
+            // 3.执行es搜索，结合 KNN 向量搜索和文本匹配，并添加权限过滤
             SearchResponse<EsDocument> response = esClient.search(s -> {
                         s.index("knowledge_base");
                         // KNN 召回
@@ -422,7 +424,7 @@ public class HybridSearchService {
     private List<String> getUserEffectiveOrgTags(String userId) {
         logger.debug("获取用户有效组织标签，用户ID: {}", userId);
         try {
-            // 获取用户名
+            // 1. 根据userId查找用户实体
             User user;
             try {
                 Long userIdLong = Long.parseLong(userId);
@@ -437,8 +439,8 @@ public class HybridSearchService {
                     .orElseThrow(() -> new CustomException("User not found: " + userId, HttpStatus.NOT_FOUND));
                 logger.debug("通过用户名找到用户: {}", user.getUsername());
             }
-            
-            // 通过orgTagCacheService获取用户的有效标签集合
+
+            // 2. 调用 OrgTagCacheService 获取有效标签
             List<String> effectiveTags = orgTagCacheService.getUserEffectiveOrgTags(user.getUsername());
             logger.debug("用户 {} 的有效组织标签: {}", user.getUsername(), effectiveTags);
             return effectiveTags;

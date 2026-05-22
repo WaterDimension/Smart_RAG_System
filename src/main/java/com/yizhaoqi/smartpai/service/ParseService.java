@@ -362,7 +362,7 @@ public class ParseService {
                 //  对每一页的文本，调用 splitTextIntoChunksWithSemantics() 做语义分块，得到子切片列表
                 List<String> childChunks = splitTextIntoChunksWithSemantics(pageText, chunkSize);
 
-                //  把子切片childChunks写入数据库，pageNumber 作为元数据一起存储，方便后续查询
+                //  把子切片ChunkText写入数据库，pageNumber 作为元数据一起存储，方便后续查询
                 savedChunkCount = saveChildChunks(fileMd5, childChunks, userId, orgTag, isPublic, savedChunkCount, pageNumber);
             }
         }

@@ -24,7 +24,7 @@ import java.util.Locale;
 
 // 确保在 BootstrapKnowledgeInitializer 之前进行初始化
 @Order(2)
-@Component
+@Component                           //配置文件elasticsearch.init.enabled控制是否自动创建索引
 @ConditionalOnProperty(name = "elasticsearch.init.enabled", havingValue = "true", matchIfMissing = true)
 public class EsIndexInitializer implements CommandLineRunner {
 
@@ -108,6 +108,11 @@ public class EsIndexInitializer implements CommandLineRunner {
         logger.info("索引 'knowledge_base' 已创建");
     }
 
+    /**
+     * 构建诊断信息，帮助排查常见的连接、认证和配置问题
+     * @param exception 原始异常
+     * @return 诊断建议字符串
+     */
     private String buildDiagnosticMessage(Exception exception) {
         Throwable rootCause = getRootCause(exception);
         String rootMessage = safeMessage(rootCause);

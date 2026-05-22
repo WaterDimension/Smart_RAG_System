@@ -76,7 +76,7 @@ public class OrgTagCacheService {
         } catch (Exception e) {
             logger.error("Failed to get organization tags for user: {}", username, e);
         }
-        return null;
+        return null;       // 缓存未命中
     }
     
     /**
@@ -137,10 +137,11 @@ public class OrgTagCacheService {
      */
     public List<String> getUserEffectiveOrgTags(String username) {
         try {
-            // 从缓存获取
+            // 1. 先查 Redis 缓存
             String cacheKey = USER_EFFECTIVE_TAGS_KEY_PREFIX + username;
             List<Object> cachedTags = redisTemplate.opsForList().range(cacheKey, 0, -1);
-            
+
+            // 缓存命中，直接返回（确保包含 DEFAULT）
             if (cachedTags != null && !cachedTags.isEmpty()) {
                 List<String> effectiveTags = cachedTags.stream()
                         .map(Object::toString)
@@ -153,24 +154,25 @@ public class OrgTagCacheService {
                 
                 return effectiveTags;
             }
-            
-            // 缓存未命中，计算有效标签集合
-            List<String> userTags = getUserOrgTags(username);
+
+            // 2. 缓存未命中 → 计算有效标签集合
+            List<String> userTags = getUserOrgTags(username);   // 从 Redis 查用户自己的标签
             Set<String> allEffectiveTags = new HashSet<>();
             
             // 如果用户有标签，添加到集合中并查找父标签
             if (userTags != null && !userTags.isEmpty()) {
                 allEffectiveTags.addAll(userTags);
-            
-            // 查找所有父标签
+
+            // 3. 递归查找所有父标签
             for (String tagId : userTags) {
                 collectParentTags(tagId, allEffectiveTags);
                 }
             }
             
-            // 关键在这里：确保 DEFAULT 永远在结果中（所有用户都有权访问 DEFAULT）
+            //确保 DEFAULT 永远在结果中（所有用户都有权访问 DEFAULT）
             allEffectiveTags.add(DEFAULT_ORG_TAG);
-            
+
+            // 5. 缓存到 Redis（24小时过期）
             List<String> result = new ArrayList<>(allEffectiveTags);
             
             // 缓存结果
@@ -192,11 +194,12 @@ public class OrgTagCacheService {
      */
     private void collectParentTags(String tagId, Set<String> result) {
         try {
+            // 从 MySQL 查 tag 实体
             OrganizationTag tag = organizationTagRepository.findByTagId(tagId).orElse(null);
             if (tag != null && tag.getParentTag() != null && !tag.getParentTag().isEmpty()) {
                 String parentTagId = tag.getParentTag();
-                result.add(parentTagId);
-                collectParentTags(parentTagId, result);
+                result.add(parentTagId);                    // 添加父标签
+                collectParentTags(parentTagId, result);     // 递归收集父标签
             }
         } catch (Exception e) {
             logger.error("Error collecting parent tags for tag: {}", tagId, e);
