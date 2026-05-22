@@ -123,7 +123,7 @@ public class ParseService {
     }
 
     /**
-     * 兼容旧版本的解析方法
+     * 兼容旧版本的解析方法,
      * 传入文件流，返回【预估Token数 + 预估分片数】
      */
     public void parseAndSave(String fileMd5, InputStream fileStream) throws IOException, TikaException {

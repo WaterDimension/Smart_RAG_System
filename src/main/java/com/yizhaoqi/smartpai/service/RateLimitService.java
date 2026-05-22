@@ -63,10 +63,13 @@ public class RateLimitService {
 
     public void checkEmbeddingQueryByUser(String userId) {
         RateLimitConfigService.DualWindowLimitView limit = rateLimitConfigService.getCurrentSettings().embeddingQueryRequest();
+        // 检查每分钟查询次数限制
         checkSingleWindow("embedding:query:min:user:" + userId, limit.minuteMax(), limit.minuteWindowSeconds(), "Embedding查询过于频繁");
+        // 检查每天查询次数限制
         checkSingleWindow("embedding:query:day:user:" + userId, limit.dayMax(), limit.dayWindowSeconds(), "Embedding查询当日次数已达上限");
     }
 
+    // 预留Embedding上传的Token用量，包含全网Token预算限制（不区分用户）
     public UsageQuotaService.TokenReservationBundle reserveEmbeddingUploadUsage(String userId, java.util.List<String> texts) {
         RateLimitConfigService.TokenBudgetView limit = rateLimitConfigService.getCurrentSettings().embeddingUploadToken();
         return usageQuotaService.reserveEmbeddingTokensWithGlobalBudget(
@@ -82,8 +85,16 @@ public class RateLimitService {
         );
     }
 
+    /**
+     * 预留Embedding查询的Token用量，包含单用户速率限制和全网Token预算限制
+     * @param userId
+     * @param texts
+     * @return
+     */
     public UsageQuotaService.TokenReservationBundle reserveEmbeddingQueryUsage(String userId, java.util.List<String> texts) {
+       // 1. 检查单用户速率限制（每分钟和每天的查询次数）
         checkEmbeddingQueryByUser(userId);
+        // 2. 预留Token用量（根据文本长度估算Token数），同时检查全网Token预算限制
         RateLimitConfigService.TokenBudgetView limit = rateLimitConfigService.getCurrentSettings().embeddingQueryGlobalToken();
         return usageQuotaService.reserveEmbeddingTokensWithGlobalBudget(
                 userId,
@@ -114,9 +125,9 @@ public class RateLimitService {
         }
 
         if (current == 1) {
-            stringRedisTemplate.expire(key, windowSeconds, TimeUnit.SECONDS);
+            stringRedisTemplate.expire(key, windowSeconds, TimeUnit.SECONDS);  // 第一次请求: 设置60秒过期
         }
-        // 当前计数 > 最大允许次数 → 触发限流
+        // 2. 如果超过限制就抛异常(ttl 是你在这个周期里被限流后还需要等的实际秒数, 一直在递减， windowsSeconds 是你在这个周期里被限流后需要等的最大秒数-固定)
         if (current > max) {
             // 获取key的剩余过期时间（还有多久重置限流）
             //异常情况：ttl == null || ttl < 0:返回 -2 → key 不存在; -1 → key存在永久有效

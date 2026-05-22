@@ -22,6 +22,11 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
+/**
+ * 模型提供商配置服务类
+ * 负责管理 LLM 和 Embedding 模型提供商的配置，包括增删改查、连接测试等功能
+ * 配置项包括 API 地址、模型标识、API
+ */
 @Service
 public class ModelProviderConfigService {
 

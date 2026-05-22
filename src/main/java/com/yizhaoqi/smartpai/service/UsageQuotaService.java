@@ -144,27 +144,36 @@ public class UsageQuotaService {
     }
 
     public void settleReservation(TokenReservation reservation, int actualTokens) {
+        // 1 跳过空操作（管理员不限制额度）
         if (reservation == null || reservation.noop()) {
             return;
         }
 
+        // 2 计算差额 = 实际 - 预扣
         long delta = (long) actualTokens - reservation.reservedTokens();
+
+        // 3 如果刚好相等 → 不用调整，只记录指标
         if (delta == 0) {
             incrementMetricIfPresent(reservation);
             return;
         }
 
+         // 5.4 如果 Redis key 已过期（比如跨天了），跳过
+        //     retainHistory = true 的 key 不会被清理，这个判断跳过
         if (!reservation.retainHistory() && !Boolean.TRUE.equals(stringRedisTemplate.hasKey(reservation.quotaKey()))) {
             incrementMetricIfPresent(reservation);
             return;
         }
 
+        // 核心：Redis 原子自增（负数就是归还）
         Long total = stringRedisTemplate.opsForValue().increment(reservation.quotaKey(), delta);
         if (reservation.retainHistory()) {
             ensureExpiry(reservation.quotaKey(), retentionTtlSeconds());
         }
         incrementMetricIfPresent(reservation);
 
+
+        // 如果调整后总额还是超了，打警告日志
         if (total != null && total > reservation.limit()) {
             logger.warn("用户 {} 的 {} token 实际用量超过额度: total={}, limit={}",
                     reservation.userId(), reservation.scope(), total, reservation.limit());
@@ -469,6 +478,7 @@ public class UsageQuotaService {
         }
     }
 
+    // 一个操作可能涉及多个预留（例如同时预留单用户和全网预算），这个类用于一次性提交或回滚这些预留
     public record TokenReservationBundle(
             String scope,
             String userId,

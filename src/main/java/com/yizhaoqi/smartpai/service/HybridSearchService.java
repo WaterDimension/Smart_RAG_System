@@ -401,12 +401,18 @@ public class HybridSearchService {
      */
     private List<Float> embedToVectorList(String text, String requesterId) {
         try {
-            List<float[]> vecs = embeddingClient.embed(List.of(text), requesterId, EmbeddingClient.UsageType.QUERY);
+            // 调用 EmbeddingClient 生成向量
+            List<float[]> vecs = embeddingClient.embed(
+                    List.of(text),   // 输入文本列表，可以支持批量
+                    requesterId,    // 用户ID（用于计费/限流）
+                    EmbeddingClient.UsageType.QUERY);   //区别于上传
             if (vecs == null || vecs.isEmpty()) {
                 logger.warn("生成的向量为空");
                 return null;
             }
-            float[] raw = vecs.get(0);
+
+
+            float[] raw = vecs.get(0);   //这里因为只传了一个文本，所以取第0个向量
             List<Float> list = new ArrayList<>(raw.length);
             for (float v : raw) {
                 list.add(v);
@@ -414,7 +420,7 @@ public class HybridSearchService {
             return list;
         } catch (Exception e) {
             logger.error("生成向量失败", e);
-            return null;
+            return null;     // 失败返回 null，上层降级为纯文本搜索
         }
     }
     
@@ -459,6 +465,7 @@ public class HybridSearchService {
             // 获取用户名
             User user;
             try {
+                // 情况A：如果 userId 是数字格式
                 Long userIdLong = Long.parseLong(userId);
                 logger.debug("解析用户ID为Long: {}", userIdLong);
                 user = userRepository.findById(userIdLong)
@@ -466,12 +473,12 @@ public class HybridSearchService {
                 logger.debug("通过ID找到用户: {}", user.getUsername());
                 return userIdLong.toString(); // 如果输入已经是数字ID，直接返回
             } catch (NumberFormatException e) {
-                // 如果userId不是数字格式，则假设它就是username
+                // 情况B：如果userId不是数字格式，就当用户名处理 (ParseService.java 第131行测试时调用时传的就是username)
                 logger.debug("用户ID不是数字格式，作为用户名查找: {}", userId);
                 user = userRepository.findByUsername(userId)
                     .orElseThrow(() -> new CustomException("User not found: " + userId, HttpStatus.NOT_FOUND));
                 logger.debug("通过用户名找到用户: {}, ID: {}", user.getUsername(), user.getId());
-                return user.getId().toString(); // 返回用户的数据库ID
+                return user.getId().toString(); // 返回用户的主键ID
             }
         } catch (Exception e) {
             logger.error("获取用户数据库ID失败: {}", e.getMessage(), e);
